@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 num = "0.4.3"
+rayon = "1.12.0"
 
 # gpu
 vulkano = "0.35.2"

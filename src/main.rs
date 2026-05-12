@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use num::complex::{c64, Complex64 as c64};
+use rayon::prelude::*;
 use std::time::Instant;
 
 mod gpu;
@@ -42,19 +43,24 @@ fn mandelbrot_explicit(c_re: f64, c_im: f64, exp: f64) -> bool {
     true
 }
 
+fn mandelbrot_count(exp: f64) -> usize {
+    let mut count = 0;
+    for x in 0..X_RESOLUTION {
+        let re = (x as f64 / X_RESOLUTION as f64) * 2.0 - 1.0;
+        count += (0..Y_RESOLUTION).into_par_iter().map(|y| {
+            let im = (y as f64 / Y_RESOLUTION as f64) * 2.0 - 1.0;
+            mandelbrot_explicit(re, im, exp)
+        }).filter(|in_set| *in_set).count();
+    }
+    count
+}
+
 fn main() {
     // gpu::main();
 
     let start = Instant::now();
-    let mut count = 0;
-    for x in 0..1_000 {
-        let re = (x as f64 / 1_000.0) * 2.0 - 1.0;
-        for y in 0..1_000 {
-            let im = (y as f64 / 1_000.0) * 2.0 - 1.0;
-            count += mandelbrot_explicit(re, im, 2.5) as u32;
-        }
-    }
+    let count = mandelbrot_count(2.5 + 1e-16);
     println!("took {:?}", start.elapsed());
     println!("count: {count}");
-    assert_eq!(count, 472328);
+    assert_eq!(count, 1313923);
 }
