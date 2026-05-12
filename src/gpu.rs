@@ -6,6 +6,7 @@
 
 use crate::{ITERS, TOTAL_RESOLUTION, X_RESOLUTION, Y_RESOLUTION};
 use std::sync::Arc;
+use indicatif::ProgressIterator;
 use vulkano::buffer::{BufferContents, Subbuffer};
 use vulkano::command_buffer::{CommandBuffer, PrimaryAutoCommandBuffer};
 use vulkano::descriptor_set::allocator::DescriptorSetAllocator;
@@ -458,17 +459,22 @@ pub(crate) fn main() {
         count
     };
 
-    let mandelbrot_aggregate = |mandelbrot_buffer| {
+    let aggregate_range = |min: f32, max: f32, steps: u32| {
+        let mandelbrot_buffer = allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
         let not_empty_buffer =
             allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
         let not_full_buffer =
             allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
 
-        let command_buffer = execute_aggregate(
-            mandelbrot_buffer,
-            not_empty_buffer.clone(),
-            not_full_buffer.clone(),
-        );
+        for exp in (0..steps).progress().map(|step| min + (max - min) * (step as f32 / steps as f32)) {
+            execute_mandelbrot(mandelbrot_buffer.clone(), exp);
+
+            execute_aggregate(
+                mandelbrot_buffer.clone(),
+                not_empty_buffer.clone(),
+                not_full_buffer.clone(),
+            );
+        }
 
         let not_empty_buffer_content = not_empty_buffer.read().unwrap();
         let not_full_buffer_content = not_full_buffer.read().unwrap();
@@ -489,7 +495,7 @@ pub(crate) fn main() {
                 .filter(|(x, y)| **x != 0 && **y != 0)
                 .count()
         );
-        println!("total count:  {}", TOTAL_BLOCK_COUNT,);
+        println!("total count:  {}", TOTAL_BLOCK_COUNT);
 
         // region export as image
         let mut image_buffer = image::ImageBuffer::new(X_BLOCK_COUNT, Y_BLOCK_COUNT);
@@ -512,19 +518,8 @@ pub(crate) fn main() {
         // endregion
     };
 
-    let mandelbrot_then_aggregate = |exp: f32| {
-        // We start by creating the buffer that will store the data.
-        let data_buffer = allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
-
-        execute_mandelbrot(data_buffer.clone(), exp);
-
-        mandelbrot_aggregate(data_buffer);
-    };
-
-    let count = mandelbrot_count(2.5);
-
-    mandelbrot_then_aggregate(2.5);
-
-    println!("count: {count}");
-    println!("Success");
+    // for  1_000 steps: 1168
+    // for 10_000 steps: 1196
+    // for 20_000 steps: 1196
+    aggregate_range(2.0, 2.001, 20_000);
 }
