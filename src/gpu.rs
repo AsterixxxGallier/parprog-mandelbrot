@@ -6,7 +6,9 @@
 
 use crate::{ITERS, TOTAL_RESOLUTION, X_RESOLUTION, Y_RESOLUTION};
 use indicatif::ProgressIterator;
+use std::iter::repeat_n;
 use std::sync::Arc;
+use std::time::Instant;
 use vulkano::buffer::{BufferContents, Subbuffer};
 use vulkano::command_buffer::PrimaryAutoCommandBuffer;
 use vulkano::descriptor_set::allocator::DescriptorSetAllocator;
@@ -48,9 +50,17 @@ mod mandelbrot {
                 uint data[];
             };
 
+            layout(set = 0, binding = 1) buffer Mask {
+                uint mask[(1923 / 8) * (1447 / 8)];
+            };
+
             layout(push_constant) uniform PushConstantData {
                 uint x_resolution;
                 uint y_resolution;
+                uint x_block_size;
+                uint y_block_size;
+                uint x_block_count;
+                uint y_block_count;
                 uint iters;
                 float exp;
             } pc;
@@ -79,6 +89,12 @@ mod mandelbrot {
                 uint y = gl_GlobalInvocationID.y;
 
                 if (x >= pc.x_resolution || y >= pc.y_resolution) return;
+
+                uint block_x = x / pc.x_block_size;
+                uint block_y = y / pc.y_block_size;
+                uint block_index = block_y * pc.x_block_count + block_x;
+
+                if (mask[block_index] == 0) return;
 
                 uint index = y * pc.x_resolution + x;
 
@@ -111,6 +127,10 @@ mod aggregate {
                 uint not_full[(1923 / 8) * (1447 / 8)];
             };
 
+            layout(set = 0, binding = 3) buffer Mask {
+                uint mask[(1923 / 8) * (1447 / 8)];
+            };
+
             layout(push_constant) uniform PushConstantData {
                 uint x_resolution;
                 uint y_resolution;
@@ -129,6 +149,10 @@ mod aggregate {
                 uint block_x = x;
                 uint block_y = y;
                 uint block_index = block_y * pc.x_block_count + block_x;
+
+                if (mask[block_index] == 0) {
+                    return;
+                }
 
                 uint min_pixel_x = block_x * pc.x_block_size;
                 uint min_pixel_y = block_y * pc.y_block_size;
@@ -185,7 +209,7 @@ fn allocate_bool_buffer(
 
 fn allocate_bool_buffer_with(
     allocator: Arc<StandardMemoryAllocator>,
-    data: &[bool],
+    data: impl ExactSizeIterator<Item = bool>,
 ) -> Subbuffer<[u32]> {
     Buffer::from_iter(
         allocator,
@@ -198,7 +222,7 @@ fn allocate_bool_buffer_with(
                 | MemoryTypeFilter::HOST_RANDOM_ACCESS,
             ..Default::default()
         },
-        data.iter().map(|bool| *bool as u32),
+        data.map(|bool| bool as u32),
     )
     .unwrap()
 }
@@ -458,40 +482,54 @@ pub(crate) fn main() {
     let descriptor_set_allocator = create_descriptor_set_allocator(&device);
     let command_buffer_allocator = create_command_buffer_allocator(&device);
 
-    let execute_mandelbrot = |data_buffer: Subbuffer<[u32]>, exp: f32| {
-        let pipeline = create_compute_pipeline(&device, mandelbrot::load);
+    let execute_mandelbrot =
+        |data_buffer: Subbuffer<[u32]>, mask_buffer: Subbuffer<[u32]>, exp: f32| {
+            let pipeline = create_compute_pipeline(&device, mandelbrot::load);
 
-        let descriptor_set =
-            create_descriptor_set(&descriptor_set_allocator, &pipeline, &[data_buffer]);
+            let descriptor_set = create_descriptor_set(
+                &descriptor_set_allocator,
+                &pipeline,
+                &[data_buffer, mask_buffer],
+            );
 
-        let push_constants = mandelbrot::PushConstantData {
-            x_resolution: X_RESOLUTION,
-            y_resolution: Y_RESOLUTION,
-            iters: ITERS,
-            exp,
+            let push_constants = mandelbrot::PushConstantData {
+                x_resolution: X_RESOLUTION,
+                y_resolution: Y_RESOLUTION,
+                x_block_size: X_BLOCK_SIZE,
+                y_block_size: Y_BLOCK_SIZE,
+                x_block_count: X_BLOCK_COUNT,
+                y_block_count: Y_BLOCK_COUNT,
+                iters: ITERS,
+                exp,
+            };
+
+            let command_buffer = create_command_buffer(
+                &command_buffer_allocator,
+                &queue,
+                &pipeline,
+                &descriptor_set,
+                push_constants,
+                [X_RESOLUTION.div_ceil(8), Y_RESOLUTION.div_ceil(8), 1],
+            );
+
+            execute(&device, &queue, command_buffer);
         };
-
-        let command_buffer = create_command_buffer(
-            &command_buffer_allocator,
-            &queue,
-            &pipeline,
-            &descriptor_set,
-            push_constants,
-            [X_RESOLUTION.div_ceil(8), Y_RESOLUTION.div_ceil(8), 1],
-        );
-
-        execute(&device, &queue, command_buffer);
-    };
 
     let execute_aggregate = |mandelbrot_buffer: Subbuffer<[u32]>,
                              not_empty_buffer: Subbuffer<[u32]>,
-                             not_full_buffer: Subbuffer<[u32]>| {
+                             not_full_buffer: Subbuffer<[u32]>,
+                             mask_buffer: Subbuffer<[u32]>| {
         let pipeline = create_compute_pipeline(&device, aggregate::load);
 
         let descriptor_set = create_descriptor_set(
             &descriptor_set_allocator,
             &pipeline,
-            &[mandelbrot_buffer, not_empty_buffer, not_full_buffer],
+            &[
+                mandelbrot_buffer,
+                not_empty_buffer,
+                not_full_buffer,
+                mask_buffer,
+            ],
         );
 
         let push_constants = aggregate::PushConstantData {
@@ -518,8 +556,12 @@ pub(crate) fn main() {
     let mandelbrot_count = |exp: f32| {
         let data_buffer =
             allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
+        let mask_buffer = allocate_bool_buffer_with(
+            memory_allocator.clone(),
+            repeat_n(true, TOTAL_BLOCK_COUNT as usize),
+        );
 
-        execute_mandelbrot(data_buffer.clone(), exp);
+        execute_mandelbrot(data_buffer.clone(), mask_buffer, exp);
 
         let data_buffer_content = data_buffer.read().unwrap();
         let count = (0..TOTAL_RESOLUTION)
@@ -551,60 +593,66 @@ pub(crate) fn main() {
     let aggregate_range = |min: f32, max: f32, steps: u32| -> (u32, Vec<bool>) {
         let mandelbrot_buffer =
             allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
-        let not_empty_buffer =
-            allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
-        let not_full_buffer =
-            allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
+        let not_empty_buffer = allocate_bool_buffer_with(
+            memory_allocator.clone(),
+            repeat_n(false, TOTAL_BLOCK_COUNT as usize),
+        );
+        let not_full_buffer = allocate_bool_buffer_with(
+            memory_allocator.clone(),
+            repeat_n(false, TOTAL_BLOCK_COUNT as usize),
+        );
+        let mask_buffer = allocate_bool_buffer_with(
+            memory_allocator.clone(),
+            repeat_n(true, TOTAL_BLOCK_COUNT as usize),
+        );
 
-        for exp in (0..steps)
+        const INITIAL_STEPS: u32 = 100;
+
+        for exp in (0..INITIAL_STEPS)
             .progress()
-            .map(|step| min + (max - min) * (step as f32 / steps as f32))
+            .map(|step| min + (max - min) * (step as f32 / INITIAL_STEPS as f32))
         {
-            execute_mandelbrot(mandelbrot_buffer.clone(), exp);
+            execute_mandelbrot(mandelbrot_buffer.clone(), mask_buffer.clone(), exp);
 
             execute_aggregate(
                 mandelbrot_buffer.clone(),
                 not_empty_buffer.clone(),
                 not_full_buffer.clone(),
+                mask_buffer.clone(),
             );
         }
 
         let not_empty_buffer_content = not_empty_buffer.read().unwrap();
         let not_full_buffer_content = not_full_buffer.read().unwrap();
 
-        let full_count = not_full_buffer_content.iter().filter(|x| **x == 0).count() as u32;
-        let interesting = not_empty_buffer_content
+        let initial_full_count = not_full_buffer_content.iter().filter(|x| **x == 0).count() as u32;
+        let initial_interesting: Vec<bool> = not_empty_buffer_content
             .iter()
             .zip(not_full_buffer_content.iter())
             .map(|(x, y)| *x != 0 && *y != 0)
             .collect();
 
-        (full_count, interesting)
-    };
+        drop(not_empty_buffer_content);
+        drop(not_full_buffer_content);
 
-    let aggregate_range_smart = |min: f32, max: f32, steps: u32| -> (u32, Vec<bool>) {
-        let (_full_count, interesting) = aggregate_range(min, max, 100);
         let mut interesting_grow = vec![false; TOTAL_BLOCK_COUNT as usize];
 
-        grow_interesting(&interesting, &mut interesting_grow);
+        grow_interesting(&initial_interesting, &mut interesting_grow);
 
-        let mandelbrot_buffer =
-            allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
-        let not_empty_buffer =
-            allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
-        let not_full_buffer =
-            allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
+        let mask_buffer =
+            allocate_bool_buffer_with(memory_allocator.clone(), interesting_grow.iter().copied());
 
         for exp in (0..steps)
             .progress()
             .map(|step| min + (max - min) * (step as f32 / steps as f32))
         {
-            execute_mandelbrot(mandelbrot_buffer.clone(), exp);
+            execute_mandelbrot(mandelbrot_buffer.clone(), mask_buffer.clone(), exp);
 
             execute_aggregate(
                 mandelbrot_buffer.clone(),
                 not_empty_buffer.clone(),
                 not_full_buffer.clone(),
+                mask_buffer.clone(),
             );
         }
 
@@ -627,9 +675,13 @@ pub(crate) fn main() {
         (full_count, interesting)
     };
 
+    let start = Instant::now();
+
     // for  1_000 steps: 1168
     // for 10_000 steps: 1196
     // for 20_000 steps: 1196
-    let (full_count, interesting) = aggregate_range_smart(2.0, 2.001, 1_000);
+    let (full_count, interesting) = aggregate_range(2.0, 2.001, 1_000);
+    println!("took {:?}", start.elapsed());
+
     report_aggregate(full_count, &interesting);
 }
