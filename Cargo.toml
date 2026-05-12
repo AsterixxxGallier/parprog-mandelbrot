@@ -7,6 +7,5 @@ edition = "2024"
 num = "0.4.3"
 
 # gpu
-vulkano = { path = "../vulkano/vulkano" }
-vulkano-shaders = { path = "../vulkano/vulkano-shaders" }
-vulkano-taskgraph = { path = "../vulkano/vulkano-taskgraph" }
+vulkano = "0.35.2"
+vulkano-shaders = "0.35.0"
