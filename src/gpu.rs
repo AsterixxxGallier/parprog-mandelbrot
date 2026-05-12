@@ -4,10 +4,11 @@
 // been more or more used for general-purpose operations as well. This is called "General-Purpose
 // GPU", or *GPGPU*. This is what this example demonstrates.
 
+use crate::{ITERS, TOTAL_RESOLUTION, X_RESOLUTION, Y_RESOLUTION};
+use image::Rgb;
 use std::sync::Arc;
 use vulkano::{
-    buffer::{Buffer, BufferCreateInfo, BufferUsage},
-    command_buffer::{
+    buffer::{Buffer, BufferCreateInfo, BufferUsage}, command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
     },
     descriptor_set::{
@@ -20,14 +21,69 @@ use vulkano::{
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
     pipeline::{
-        compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo,
-        ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline,
+        PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
     sync::{self, GpuFuture},
+    DeviceSize,
     VulkanLibrary,
 };
-use vulkano::device::DeviceFeatures;
+
+mod cs {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: r"
+            #version 450
+
+            layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+            layout(set = 0, binding = 0) buffer Data {
+                uint data[];
+            };
+
+            layout(push_constant) uniform PushConstantData {
+                uint x_resolution;
+                uint y_resolution;
+                uint iters;
+                float exp;
+            } pc;
+
+            bool mandelbrot(float c_re, float c_im, float exp, uint iters) {
+                float z_re = c_re;
+                float z_im = c_im;
+                for (uint i = 0; i < iters; i++) {
+                    float z_norm = length(vec2(z_re, z_im));
+                    float z_arg = atan(z_im, z_re);
+                    float pow_norm = pow(z_norm, exp);
+                    float pow_arg = z_arg * exp;
+                    float pow_re = pow_norm * cos(pow_arg);
+                    float pow_im = pow_norm * sin(pow_arg);
+                    z_re = pow_re + c_re;
+                    z_im = pow_im + c_im;
+                    if (z_re * z_re + z_im * z_im > 4.0) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            void main() {
+                uint x = gl_GlobalInvocationID.x;
+                uint y = gl_GlobalInvocationID.y;
+
+                if (x >= pc.x_resolution || y >= pc.y_resolution) return;
+
+                uint index = y * pc.x_resolution + x;
+
+                float re = (float(x) / float(pc.x_resolution)) * 2.0 - 1.0;
+                float im = (float(y) / float(pc.y_resolution)) * 2.0 - 1.0;
+
+                data[index] = uint(mandelbrot(re, im, pc.exp, pc.iters));
+            }
+        ",
+    }
+}
 
 pub(crate) fn main() {
     // As with other examples, the first step is to create an instance.
@@ -50,7 +106,6 @@ pub(crate) fn main() {
         .enumerate_physical_devices()
         .unwrap()
         .filter(|p| p.supported_extensions().contains(&device_extensions))
-        .filter(|p| p.supported_features().shader_float64)
         .filter_map(|p| {
             // The Vulkan specs guarantee that a compliant implementation must provide at least one
             // queue that supports compute operations.
@@ -84,10 +139,6 @@ pub(crate) fn main() {
                 queue_family_index,
                 ..Default::default()
             }],
-            enabled_features: DeviceFeatures {
-                shader_float64: true,
-                ..Default::default()
-            },
             ..Default::default()
         },
     )
@@ -117,25 +168,6 @@ pub(crate) fn main() {
     // If you are familiar with graphics pipeline, the principle is the same except that compute
     // pipelines are much simpler to create.
     let pipeline = {
-        mod cs {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                src: r"
-                    #version 450
-
-                    layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-                    layout(set = 0, binding = 0) buffer Data {
-                        double data[];
-                    };
-
-                    void main() {
-                        uint idx = gl_GlobalInvocationID.x;
-                        data[idx] *= 12;
-                    }
-                ",
-            }
-        }
         let cs = cs::load(device.clone())
             .unwrap()
             .entry_point("main")
@@ -167,7 +199,7 @@ pub(crate) fn main() {
     ));
 
     // We start by creating the buffer that will store the data.
-    let data_buffer = Buffer::from_iter(
+    let data_buffer = Buffer::new_unsized::<[u32]>(
         memory_allocator,
         BufferCreateInfo {
             usage: BufferUsage::STORAGE_BUFFER,
@@ -178,8 +210,7 @@ pub(crate) fn main() {
                 | MemoryTypeFilter::HOST_RANDOM_ACCESS,
             ..Default::default()
         },
-        // Iterator that produces the data.
-        0..65536u32,
+        TOTAL_RESOLUTION as DeviceSize,
     )
     .unwrap();
 
@@ -199,6 +230,16 @@ pub(crate) fn main() {
         [],
     )
     .unwrap();
+
+    // The `vulkano_shaders::shaders!` macro generates a struct with the correct representation of
+    // the push constants struct specified in the shader. Here we create an instance of the
+    // generated struct.
+    let push_constants = cs::PushConstantData {
+        x_resolution: X_RESOLUTION,
+        y_resolution: Y_RESOLUTION,
+        iters: ITERS,
+        exp: 2.5,
+    };
 
     // In order to execute our operation, we have to build a command buffer.
     let mut builder = AutoCommandBufferBuilder::primary(
@@ -221,11 +262,13 @@ pub(crate) fn main() {
             0,
             set,
         )
+        .unwrap()
+        .push_constants(pipeline.layout().clone(), 0, push_constants)
         .unwrap();
 
     // The command buffer only does one thing: execute the compute pipeline. This is called a
     // *dispatch* operation.
-    unsafe { builder.dispatch([1024, 1, 1]) }.unwrap();
+    unsafe { builder.dispatch([X_RESOLUTION.div_ceil(8), Y_RESOLUTION.div_ceil(8), 1]) }.unwrap();
 
     // Finish building the command buffer by calling `build`.
     let command_buffer = builder.build().unwrap();
@@ -258,9 +301,29 @@ pub(crate) fn main() {
     // it out. The call to `read()` would return an error if the buffer was still in use by the
     // GPU.
     let data_buffer_content = data_buffer.read().unwrap();
-    for n in 0..65536u32 {
-        assert_eq!(data_buffer_content[n as usize], n * 12);
-    }
+    let count = (0..TOTAL_RESOLUTION)
+        .filter(|i| data_buffer_content[*i as usize] != 0)
+        .count();
+    // for n in 0..65536u32 {
+    //     let expected = (n as f32) * 12.0 + 1.0;
+    //     let actual = data_buffer_content[n as usize];
+    //     let error = ((actual - expected) / expected.max(f32::EPSILON)).abs();
+    //     assert!(error < 1e-5, "expected {expected}, got {actual}");
+    // }
 
+    let mut image_buffer = image::ImageBuffer::new(X_RESOLUTION, Y_RESOLUTION);
+    let in_set_color = Rgb([0u8; 3]);
+    let not_in_set_color = Rgb([255u8; 3]);
+    for x in 0..X_RESOLUTION {
+        for y in 0..Y_RESOLUTION {
+            let index = y * X_RESOLUTION + x;
+            let in_set = data_buffer_content[index as usize] != 0;
+            let color = if in_set { in_set_color } else { not_in_set_color };
+            image_buffer.put_pixel(x, y, color);
+        }
+    }
+    image_buffer.save("out.png");
+
+    println!("count: {count}");
     println!("Success");
 }
