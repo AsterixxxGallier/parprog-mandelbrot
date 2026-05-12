@@ -1,5 +1,7 @@
-use std::time::Instant;
+#![allow(unused)]
+
 use num::complex::{c64, Complex64 as c64};
+use std::time::Instant;
 
 mod gpu;
 
@@ -21,20 +23,38 @@ fn mandelbrot(c: c64, exp: f64) -> bool {
     true
 }
 
-fn main() {
-    gpu::main();
+fn mandelbrot_explicit(c_re: f64, c_im: f64, exp: f64) -> bool {
+    let mut z_re = c_re;
+    let mut z_im = c_im;
+    for _ in 0..ITERS {
+        let z_norm = z_re.hypot(z_im);
+        let z_arg = z_im.atan2(z_re);
+        let pow_norm = z_norm.powf(exp);
+        let pow_arg = z_arg * exp;
+        let pow_re = pow_norm * pow_arg.cos();
+        let pow_im = pow_norm * pow_arg.sin();
+        z_re = pow_re + c_re;
+        z_im = pow_im + c_im;
+        if z_re * z_re + z_im * z_im > 4.0 {
+            return false;
+        }
+    }
+    true
+}
 
-    /*let start = Instant::now();
+fn main() {
+    // gpu::main();
+
+    let start = Instant::now();
     let mut count = 0;
     for x in 0..1_000 {
         let re = (x as f64 / 1_000.0) * 2.0 - 1.0;
         for y in 0..1_000 {
             let im = (y as f64 / 1_000.0) * 2.0 - 1.0;
-            let c = c64(re, im);
-            count += mandelbrot(c, 2.5) as u32;
+            count += mandelbrot_explicit(re, im, 2.5) as u32;
         }
     }
     println!("took {:?}", start.elapsed());
     println!("count: {count}");
-    assert_eq!(count, 472328);*/
+    assert_eq!(count, 472328);
 }
