@@ -27,6 +27,7 @@ use vulkano::{
     sync::{self, GpuFuture},
     VulkanLibrary,
 };
+use vulkano::device::DeviceFeatures;
 
 pub(crate) fn main() {
     // As with other examples, the first step is to create an instance.
@@ -49,6 +50,7 @@ pub(crate) fn main() {
         .enumerate_physical_devices()
         .unwrap()
         .filter(|p| p.supported_extensions().contains(&device_extensions))
+        .filter(|p| p.supported_features().shader_float64)
         .filter_map(|p| {
             // The Vulkan specs guarantee that a compliant implementation must provide at least one
             // queue that supports compute operations.
@@ -82,6 +84,10 @@ pub(crate) fn main() {
                 queue_family_index,
                 ..Default::default()
             }],
+            enabled_features: DeviceFeatures {
+                shader_float64: true,
+                ..Default::default()
+            },
             ..Default::default()
         },
     )
@@ -120,7 +126,7 @@ pub(crate) fn main() {
                     layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
                     layout(set = 0, binding = 0) buffer Data {
-                        uint data[];
+                        double data[];
                     };
 
                     void main() {
