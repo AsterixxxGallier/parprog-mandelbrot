@@ -47,9 +47,9 @@ fn mandelbrot_explicit(c_re: f64, c_im: f64, exp: f64) -> bool {
 fn mandelbrot_count(exp: f64) -> usize {
     let mut count = 0;
     for x in 0..X_RESOLUTION {
-        let re = (x as f64 / X_RESOLUTION as f64) * 2.0 - 1.0;
+        let re = (x as f64 / X_RESOLUTION as f64) * 4.0 - 2.0;
         count += (0..Y_RESOLUTION).into_par_iter().map(|y| {
-            let im = (y as f64 / Y_RESOLUTION as f64) * 2.0 - 1.0;
+            let im = (y as f64 / Y_RESOLUTION as f64) * 4.0 - 2.0;
             mandelbrot_explicit(re, im, exp)
         }).filter(|in_set| *in_set).count();
     }
@@ -78,9 +78,9 @@ fn mandelbrot_explicit_half(c_re: f32, c_im: f32, exp: f32) -> bool {
 fn mandelbrot_count_half(exp: f32) -> usize {
     let mut count = 0;
     for x in 0..X_RESOLUTION {
-        let re = (x as f32 / X_RESOLUTION as f32) * 2.0 - 1.0;
+        let re = (x as f32 / X_RESOLUTION as f32) * 4.0 - 2.0;
         count += (0..Y_RESOLUTION).into_par_iter().map(|y| {
-            let im = (y as f32 / Y_RESOLUTION as f32) * 2.0 - 1.0;
+            let im = (y as f32 / Y_RESOLUTION as f32) * 4.0 - 2.0;
             mandelbrot_explicit_half(re, im, exp)
         }).filter(|in_set| *in_set).count();
     }
