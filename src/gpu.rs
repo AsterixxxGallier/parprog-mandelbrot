@@ -5,26 +5,37 @@
 // GPU", or *GPGPU*. This is what this example demonstrates.
 
 use crate::{ITERS, TOTAL_RESOLUTION, X_RESOLUTION, Y_RESOLUTION};
-use std::sync::Arc;
 use indicatif::ProgressIterator;
+use std::sync::Arc;
 use vulkano::buffer::{BufferContents, Subbuffer};
-use vulkano::command_buffer::{CommandBuffer, PrimaryAutoCommandBuffer};
+use vulkano::command_buffer::PrimaryAutoCommandBuffer;
 use vulkano::descriptor_set::allocator::DescriptorSetAllocator;
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::Queue;
 use vulkano::shader::ShaderModule;
-use vulkano::{buffer::{Buffer, BufferCreateInfo, BufferUsage}, command_buffer, command_buffer::{
-    allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
-}, descriptor_set::{
-    allocator::StandardDescriptorSetAllocator, DescriptorSet, WriteDescriptorSet,
-}, device::{
-    physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo,
-    QueueFlags,
-}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator}, pipeline::{
-    compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline,
-    PipelineBindPoint, PipelineLayout,
-    PipelineShaderStageCreateInfo,
-}, sync::{self, GpuFuture}, DeviceSize, Validated, VulkanError, VulkanLibrary};
+use vulkano::{
+    buffer::{Buffer, BufferCreateInfo, BufferUsage}, command_buffer::{
+        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
+    }, descriptor_set::{
+        allocator::StandardDescriptorSetAllocator, DescriptorSet, WriteDescriptorSet,
+    }, device::{
+        physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo,
+        QueueFlags,
+    },
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}
+    ,
+    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    pipeline::{
+        compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline,
+        PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
+    },
+    sync::{self, GpuFuture},
+    DeviceSize,
+    Validated,
+    VulkanError,
+    VulkanLibrary,
+};
 
 mod mandelbrot {
     vulkano_shaders::shader! {
@@ -140,6 +151,59 @@ mod aggregate {
 
                 not_empty[block_index] |= uint(block_not_empty);
                 not_full[block_index] |= uint(block_not_full);
+            }
+        ",
+    }
+}
+
+mod grow {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: r"
+            #version 450
+
+            layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+            layout(set = 0, binding = 0) buffer Old {
+                uint old[(1923 / 8) * (1447 / 8)];
+            };
+
+            layout(set = 0, binding = 0) buffer New {
+                uint new[(1923 / 8) * (1447 / 8)];
+            };
+
+            layout(push_constant) uniform PushConstantData {
+                uint x_block_count;
+                uint y_block_count;
+            } pc;
+
+            uint at(uint x, uint y) {
+                if (x < pc.x_block_count && y < pc.y_block_count) {
+                    return old[y * pc.x_block_count];
+                } else {
+                    return 0;
+                }
+            }
+
+            void main() {
+                uint x = gl_GlobalInvocationID.x;
+                uint y = gl_GlobalInvocationID.y;
+
+                if (x >= pc.x_block_count || y >= pc.y_block_count) return;
+
+                uint any = 0;
+
+                any |= at(x - 1, y - 1);
+                any |= at(x - 1, y);
+                any |= at(x - 1, y + 1);
+                any |= at(x, y - 1);
+                any |= at(x, y);
+                any |= at(x, y + 1);
+                any |= at(x + 1, y - 1);
+                any |= at(x + 1, y);
+                any |= at(x + 1, y + 1);
+
+                new[y * pc.x_block_count + x] = any;
             }
         ",
     }
@@ -331,7 +395,11 @@ fn create_command_buffer(
     builder.build().unwrap()
 }
 
-fn execute(device: &Arc<Device>, queue: &Arc<Queue>, command_buffer: Arc<PrimaryAutoCommandBuffer>) {
+fn execute(
+    device: &Arc<Device>,
+    queue: &Arc<Queue>,
+    command_buffer: Arc<PrimaryAutoCommandBuffer>,
+) {
     sync::now(device.clone())
         .then_execute(queue.clone(), command_buffer)
         .unwrap()
@@ -339,6 +407,35 @@ fn execute(device: &Arc<Device>, queue: &Arc<Queue>, command_buffer: Arc<Primary
         .unwrap()
         .wait(None)
         .unwrap()
+}
+
+fn report_aggregate(full_count: u32, interesting: &[bool]) {
+    let total_count = TOTAL_BLOCK_COUNT;
+    let interesting_count = interesting.iter().filter(|b| **b).count() as u32;
+    let empty_count = total_count - full_count - interesting_count;
+
+    println!("empty:       {empty_count:>5}");
+    println!("full:        {full_count:>5}");
+    println!("interesting: {interesting_count:>5}");
+    println!("total:       {total_count:>5}");
+
+    // region export as image
+    let mut image_buffer = image::ImageBuffer::new(X_BLOCK_COUNT, Y_BLOCK_COUNT);
+    let in_set_color = image::Rgb([0u8; 3]);
+    let not_in_set_color = image::Rgb([255u8; 3]);
+    for x in 0..X_BLOCK_COUNT {
+        for y in 0..Y_BLOCK_COUNT {
+            let index = y * X_BLOCK_COUNT + x;
+            let color = if interesting[index as usize] {
+                in_set_color
+            } else {
+                not_in_set_color
+            };
+            image_buffer.put_pixel(x, y, color);
+        }
+    }
+    image_buffer.save("out2.png");
+    // endregion
 }
 
 pub(crate) fn main() {
@@ -393,38 +490,63 @@ pub(crate) fn main() {
         execute(&device, &queue, command_buffer);
     };
 
-    let execute_aggregate =
-        |mandelbrot_buffer: Subbuffer<[u32]>,
-         not_empty_buffer: Subbuffer<[u32]>,
-         not_full_buffer: Subbuffer<[u32]>| {
-            let pipeline = create_compute_pipeline(&device, aggregate::load);
+    let execute_aggregate = |mandelbrot_buffer: Subbuffer<[u32]>,
+                             not_empty_buffer: Subbuffer<[u32]>,
+                             not_full_buffer: Subbuffer<[u32]>| {
+        let pipeline = create_compute_pipeline(&device, aggregate::load);
 
-            let descriptor_set = create_descriptor_set(
-                &descriptor_set_allocator,
-                &pipeline,
-                &[mandelbrot_buffer, not_empty_buffer, not_full_buffer],
-            );
+        let descriptor_set = create_descriptor_set(
+            &descriptor_set_allocator,
+            &pipeline,
+            &[mandelbrot_buffer, not_empty_buffer, not_full_buffer],
+        );
 
-            let push_constants = aggregate::PushConstantData {
-                x_resolution: X_RESOLUTION,
-                y_resolution: Y_RESOLUTION,
-                x_block_count: X_BLOCK_COUNT,
-                y_block_count: Y_BLOCK_COUNT,
-                x_block_size: X_BLOCK_SIZE,
-                y_block_size: Y_BLOCK_SIZE,
-            };
-
-            let command_buffer = create_command_buffer(
-                &command_buffer_allocator,
-                &queue,
-                &pipeline,
-                &descriptor_set,
-                push_constants,
-                [X_BLOCK_COUNT.div_ceil(8), Y_BLOCK_COUNT.div_ceil(8), 1],
-            );
-
-            execute(&device, &queue, command_buffer);
+        let push_constants = aggregate::PushConstantData {
+            x_resolution: X_RESOLUTION,
+            y_resolution: Y_RESOLUTION,
+            x_block_count: X_BLOCK_COUNT,
+            y_block_count: Y_BLOCK_COUNT,
+            x_block_size: X_BLOCK_SIZE,
+            y_block_size: Y_BLOCK_SIZE,
         };
+
+        let command_buffer = create_command_buffer(
+            &command_buffer_allocator,
+            &queue,
+            &pipeline,
+            &descriptor_set,
+            push_constants,
+            [X_BLOCK_COUNT.div_ceil(8), Y_BLOCK_COUNT.div_ceil(8), 1],
+        );
+
+        execute(&device, &queue, command_buffer);
+    };
+
+    let execute_grow = |input_buffer: Subbuffer<[u32]>, output_buffer: Subbuffer<[u32]>| {
+        let pipeline = create_compute_pipeline(&device, grow::load);
+
+        let descriptor_set = create_descriptor_set(
+            &descriptor_set_allocator,
+            &pipeline,
+            &[input_buffer, output_buffer],
+        );
+
+        let push_constants = grow::PushConstantData {
+            x_block_count: X_BLOCK_COUNT,
+            y_block_count: Y_BLOCK_COUNT,
+        };
+
+        let command_buffer = create_command_buffer(
+            &command_buffer_allocator,
+            &queue,
+            &pipeline,
+            &descriptor_set,
+            push_constants,
+            [X_BLOCK_COUNT.div_ceil(8), Y_BLOCK_COUNT.div_ceil(8), 1],
+        );
+
+        execute(&device, &queue, command_buffer);
+    };
 
     let mandelbrot_count = |exp: f32| {
         let data_buffer =
@@ -459,14 +581,18 @@ pub(crate) fn main() {
         count
     };
 
-    let aggregate_range = |min: f32, max: f32, steps: u32| {
-        let mandelbrot_buffer = allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
+    let aggregate_range = |min: f32, max: f32, steps: u32| -> (u32, Vec<bool>) {
+        let mandelbrot_buffer =
+            allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
         let not_empty_buffer =
             allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
         let not_full_buffer =
             allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
 
-        for exp in (0..steps).progress().map(|step| min + (max - min) * (step as f32 / steps as f32)) {
+        for exp in (0..steps)
+            .progress()
+            .map(|step| min + (max - min) * (step as f32 / steps as f32))
+        {
             execute_mandelbrot(mandelbrot_buffer.clone(), exp);
 
             execute_aggregate(
@@ -479,47 +605,19 @@ pub(crate) fn main() {
         let not_empty_buffer_content = not_empty_buffer.read().unwrap();
         let not_full_buffer_content = not_full_buffer.read().unwrap();
 
-        println!(
-            "not empty count: {}",
-            not_empty_buffer_content.iter().filter(|x| **x != 0).count()
-        );
-        println!(
-            "not full count:  {}",
-            not_full_buffer_content.iter().filter(|x| **x != 0).count()
-        );
-        println!(
-            "interesting count:  {}",
-            not_empty_buffer_content
-                .iter()
-                .zip(not_full_buffer_content.iter())
-                .filter(|(x, y)| **x != 0 && **y != 0)
-                .count()
-        );
-        println!("total count:  {}", TOTAL_BLOCK_COUNT);
+        let full_count = not_full_buffer_content.iter().filter(|x| **x == 0).count() as u32;
+        let interesting = not_empty_buffer_content
+            .iter()
+            .zip(not_full_buffer_content.iter())
+            .map(|(x, y)| *x != 0 && *y != 0)
+            .collect();
 
-        // region export as image
-        let mut image_buffer = image::ImageBuffer::new(X_BLOCK_COUNT, Y_BLOCK_COUNT);
-        let in_set_color = image::Rgb([0u8; 3]);
-        let not_in_set_color = image::Rgb([255u8; 3]);
-        for x in 0..X_BLOCK_COUNT {
-            for y in 0..Y_BLOCK_COUNT {
-                let index = y * X_BLOCK_COUNT + x;
-                let not_empty = not_empty_buffer_content[index as usize] != 0;
-                let not_full = not_full_buffer_content[index as usize] != 0;
-                let color = if not_empty && not_full {
-                    in_set_color
-                } else {
-                    not_in_set_color
-                };
-                image_buffer.put_pixel(x, y, color);
-            }
-        }
-        image_buffer.save("out2.png");
-        // endregion
+        (full_count, interesting)
     };
 
     // for  1_000 steps: 1168
     // for 10_000 steps: 1196
     // for 20_000 steps: 1196
-    aggregate_range(2.0, 2.001, 20_000);
+    let (full_count, interesting) = aggregate_range(2.0, 2.001, 1_000);
+    report_aggregate(full_count, &interesting);
 }
