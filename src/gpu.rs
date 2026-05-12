@@ -22,8 +22,7 @@ use vulkano::{
         physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo,
         QueueFlags,
     },
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}
-    ,
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
     pipeline::{
         compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline,
@@ -156,59 +155,6 @@ mod aggregate {
     }
 }
 
-mod grow {
-    vulkano_shaders::shader! {
-        ty: "compute",
-        src: r"
-            #version 450
-
-            layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-
-            layout(set = 0, binding = 0) buffer Old {
-                uint old[(1923 / 8) * (1447 / 8)];
-            };
-
-            layout(set = 0, binding = 0) buffer New {
-                uint new[(1923 / 8) * (1447 / 8)];
-            };
-
-            layout(push_constant) uniform PushConstantData {
-                uint x_block_count;
-                uint y_block_count;
-            } pc;
-
-            uint at(uint x, uint y) {
-                if (x < pc.x_block_count && y < pc.y_block_count) {
-                    return old[y * pc.x_block_count];
-                } else {
-                    return 0;
-                }
-            }
-
-            void main() {
-                uint x = gl_GlobalInvocationID.x;
-                uint y = gl_GlobalInvocationID.y;
-
-                if (x >= pc.x_block_count || y >= pc.y_block_count) return;
-
-                uint any = 0;
-
-                any |= at(x - 1, y - 1);
-                any |= at(x - 1, y);
-                any |= at(x - 1, y + 1);
-                any |= at(x, y - 1);
-                any |= at(x, y);
-                any |= at(x, y + 1);
-                any |= at(x + 1, y - 1);
-                any |= at(x + 1, y);
-                any |= at(x + 1, y + 1);
-
-                new[y * pc.x_block_count + x] = any;
-            }
-        ",
-    }
-}
-
 // keep in sync with shader
 const X_BLOCK_SIZE: u32 = 8;
 const Y_BLOCK_SIZE: u32 = 8;
@@ -233,6 +179,26 @@ fn allocate_bool_buffer(
             ..Default::default()
         },
         len,
+    )
+    .unwrap()
+}
+
+fn allocate_bool_buffer_with(
+    allocator: Arc<StandardMemoryAllocator>,
+    data: &[bool],
+) -> Subbuffer<[u32]> {
+    Buffer::from_iter(
+        allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            ..Default::default()
+        },
+        data.iter().map(|bool| *bool as u32),
     )
     .unwrap()
 }
@@ -438,6 +404,33 @@ fn report_aggregate(full_count: u32, interesting: &[bool]) {
     // endregion
 }
 
+fn grow_interesting(old: &[bool], new: &mut [bool]) {
+    let at = |x, y| {
+        if x < X_BLOCK_COUNT && y < Y_BLOCK_COUNT {
+            old[(y * X_BLOCK_COUNT + x) as usize]
+        } else {
+            false
+        }
+    };
+    for x in 0..X_BLOCK_COUNT {
+        for y in 0..Y_BLOCK_COUNT {
+            let mut any = false;
+
+            any |= at(x - 1, y - 1);
+            any |= at(x - 1, y);
+            any |= at(x - 1, y + 1);
+            any |= at(x, y - 1);
+            any |= at(x, y);
+            any |= at(x, y + 1);
+            any |= at(x + 1, y - 1);
+            any |= at(x + 1, y);
+            any |= at(x + 1, y + 1);
+
+            new[(y * X_BLOCK_COUNT + x) as usize] = any;
+        }
+    }
+}
+
 pub(crate) fn main() {
     let device_extensions = DeviceExtensions {
         khr_storage_buffer_storage_class: true,
@@ -522,32 +515,6 @@ pub(crate) fn main() {
         execute(&device, &queue, command_buffer);
     };
 
-    let execute_grow = |input_buffer: Subbuffer<[u32]>, output_buffer: Subbuffer<[u32]>| {
-        let pipeline = create_compute_pipeline(&device, grow::load);
-
-        let descriptor_set = create_descriptor_set(
-            &descriptor_set_allocator,
-            &pipeline,
-            &[input_buffer, output_buffer],
-        );
-
-        let push_constants = grow::PushConstantData {
-            x_block_count: X_BLOCK_COUNT,
-            y_block_count: Y_BLOCK_COUNT,
-        };
-
-        let command_buffer = create_command_buffer(
-            &command_buffer_allocator,
-            &queue,
-            &pipeline,
-            &descriptor_set,
-            push_constants,
-            [X_BLOCK_COUNT.div_ceil(8), Y_BLOCK_COUNT.div_ceil(8), 1],
-        );
-
-        execute(&device, &queue, command_buffer);
-    };
-
     let mandelbrot_count = |exp: f32| {
         let data_buffer =
             allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
@@ -615,9 +582,54 @@ pub(crate) fn main() {
         (full_count, interesting)
     };
 
+    let aggregate_range_smart = |min: f32, max: f32, steps: u32| -> (u32, Vec<bool>) {
+        let (_full_count, interesting) = aggregate_range(min, max, 100);
+        let mut interesting_grow = vec![false; TOTAL_BLOCK_COUNT as usize];
+
+        grow_interesting(&interesting, &mut interesting_grow);
+
+        let mandelbrot_buffer =
+            allocate_bool_buffer(memory_allocator.clone(), TOTAL_RESOLUTION as DeviceSize);
+        let not_empty_buffer =
+            allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
+        let not_full_buffer =
+            allocate_bool_buffer(memory_allocator.clone(), TOTAL_BLOCK_COUNT as DeviceSize);
+
+        for exp in (0..steps)
+            .progress()
+            .map(|step| min + (max - min) * (step as f32 / steps as f32))
+        {
+            execute_mandelbrot(mandelbrot_buffer.clone(), exp);
+
+            execute_aggregate(
+                mandelbrot_buffer.clone(),
+                not_empty_buffer.clone(),
+                not_full_buffer.clone(),
+            );
+        }
+
+        let not_empty_buffer_content = not_empty_buffer.read().unwrap();
+        let not_full_buffer_content = not_full_buffer.read().unwrap();
+
+        let full_count = not_full_buffer_content.iter().filter(|x| **x == 0).count() as u32;
+        let interesting: Vec<bool> = not_empty_buffer_content
+            .iter()
+            .zip(not_full_buffer_content.iter())
+            .map(|(x, y)| *x != 0 && *y != 0)
+            .collect();
+
+        for i in 0..TOTAL_BLOCK_COUNT as usize {
+            if interesting[i] {
+                assert!(interesting_grow[i]);
+            }
+        }
+
+        (full_count, interesting)
+    };
+
     // for  1_000 steps: 1168
     // for 10_000 steps: 1196
     // for 20_000 steps: 1196
-    let (full_count, interesting) = aggregate_range(2.0, 2.001, 1_000);
+    let (full_count, interesting) = aggregate_range_smart(2.0, 2.001, 1_000);
     report_aggregate(full_count, &interesting);
 }
