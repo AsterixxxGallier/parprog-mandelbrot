@@ -5,3 +5,8 @@ edition = "2024"
 
 [dependencies]
 num = "0.4.3"
+
+# gpu
+vulkano = { path = "../vulkano/vulkano" }
+vulkano-shaders = { path = "../vulkano/vulkano-shaders" }
+vulkano-taskgraph = { path = "../vulkano/vulkano-taskgraph" }
