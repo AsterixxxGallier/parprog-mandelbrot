@@ -5,8 +5,8 @@
 // GPU", or *GPGPU*. This is what this example demonstrates.
 
 use crate::{ITERS, TOTAL_RESOLUTION, X_RESOLUTION, Y_RESOLUTION};
-use image::Rgb;
 use std::sync::Arc;
+use vulkano::buffer::Subbuffer;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage}, command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
@@ -84,6 +84,78 @@ mod cs {
         ",
     }
 }
+
+mod aggregate {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: r"
+            #version 450
+
+            layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+            layout(set = 0, binding = 0) buffer InSet {
+                uint in_set[1923 * 1447];
+            };
+
+            layout(set = 0, binding = 1) buffer NotEmpty {
+                uint not_empty[(1923 / 8) * (1447 / 8)];
+            };
+
+            layout(set = 0, binding = 2) buffer NotFull {
+                uint not_full[(1923 / 8) * (1447 / 8)];
+            };
+
+            layout(push_constant) uniform PushConstantData {
+                uint x_resolution;
+                uint y_resolution;
+                uint x_block_count;
+                uint y_block_count;
+                uint x_block_size;
+                uint y_block_size;
+            } pc;
+
+            void main() {
+                uint x = gl_GlobalInvocationID.x;
+                uint y = gl_GlobalInvocationID.y;
+
+                if (x >= pc.x_block_count || y >= pc.y_block_count) return;
+
+                uint block_x = x;
+                uint block_y = y;
+                uint block_index = block_y * pc.x_block_count + block_x;
+
+                uint min_pixel_x = block_x * pc.x_block_size;
+                uint min_pixel_y = block_y * pc.y_block_size;
+
+                uint max_pixel_x = min(int(pc.x_resolution), int(min_pixel_x + pc.x_block_size));
+                uint max_pixel_y = min(int(pc.y_resolution), int(min_pixel_y + pc.y_block_size));
+
+                bool block_not_empty = false;
+                bool block_not_full = false;
+
+                for (uint pixel_x = min_pixel_x; pixel_x < max_pixel_x; pixel_x++) {
+                    for (uint pixel_y = min_pixel_y; pixel_y < max_pixel_y; pixel_y++) {
+                        uint pixel_index = pixel_y * pc.x_resolution + pixel_x;
+                        bool pixel_in_set = bool(in_set[pixel_index]);
+                        if (pixel_in_set) block_not_empty = true;
+                        else block_not_full = true;
+                    }
+                }
+
+                not_empty[block_index] = uint(block_not_empty);
+                not_full[block_index] = uint(block_not_full);
+            }
+        ",
+    }
+}
+
+// keep in sync with shader
+const X_BLOCK_SIZE: u32 = 8;
+const Y_BLOCK_SIZE: u32 = 8;
+
+const X_BLOCK_COUNT: u32 = X_RESOLUTION.div_ceil(X_BLOCK_SIZE);
+const Y_BLOCK_COUNT: u32 = Y_RESOLUTION.div_ceil(Y_BLOCK_SIZE);
+const TOTAL_BLOCK_COUNT: u32 = X_BLOCK_COUNT * Y_BLOCK_COUNT;
 
 pub(crate) fn main() {
     // As with other examples, the first step is to create an instance.
@@ -163,31 +235,6 @@ pub(crate) fn main() {
     // GPU will need to access data, there is no other choice but to transfer the data through the
     // slow PCI express bus.
 
-    // We need to create the compute pipeline that describes our operation.
-    //
-    // If you are familiar with graphics pipeline, the principle is the same except that compute
-    // pipelines are much simpler to create.
-    let pipeline = {
-        let cs = cs::load(device.clone())
-            .unwrap()
-            .entry_point("main")
-            .unwrap();
-        let stage = PipelineShaderStageCreateInfo::new(cs);
-        let layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
-                .into_pipeline_layout_create_info(device.clone())
-                .unwrap(),
-        )
-        .unwrap();
-        ComputePipeline::new(
-            device.clone(),
-            None,
-            ComputePipelineCreateInfo::stage_layout(stage, layout),
-        )
-        .unwrap()
-    };
-
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
     let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
         device.clone(),
@@ -198,131 +245,368 @@ pub(crate) fn main() {
         Default::default(),
     ));
 
-    // We start by creating the buffer that will store the data.
-    let data_buffer = Buffer::new_unsized::<[u32]>(
-        memory_allocator,
-        BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
-            ..Default::default()
-        },
-        TOTAL_RESOLUTION as DeviceSize,
-    )
-    .unwrap();
+    let mandelbrot_command_buffer = |data_buffer: Subbuffer<[u32]>, exp: f32| {
+        // We need to create the compute pipeline that describes our operation.
+        //
+        // If you are familiar with graphics pipeline, the principle is the same except that compute
+        // pipelines are much simpler to create.
+        let pipeline = {
+            let cs = cs::load(device.clone())
+                .unwrap()
+                .entry_point("main")
+                .unwrap();
+            let stage = PipelineShaderStageCreateInfo::new(cs);
+            let layout = PipelineLayout::new(
+                device.clone(),
+                PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
+                    .into_pipeline_layout_create_info(device.clone())
+                    .unwrap(),
+            )
+            .unwrap();
+            ComputePipeline::new(
+                device.clone(),
+                None,
+                ComputePipelineCreateInfo::stage_layout(stage, layout),
+            )
+            .unwrap()
+        };
 
-    // In order to let the shader access the buffer, we need to build a *descriptor set* that
-    // contains the buffer.
-    //
-    // The resources that we bind to the descriptor set must match the resources expected by the
-    // pipeline which we pass as the first parameter.
-    //
-    // If you want to run the pipeline on multiple different buffers, you need to create multiple
-    // descriptor sets that each contain the buffer you want to run the shader on.
-    let layout = &pipeline.layout().set_layouts()[0];
-    let set = DescriptorSet::new(
-        descriptor_set_allocator,
-        layout.clone(),
-        [WriteDescriptorSet::buffer(0, data_buffer.clone())],
-        [],
-    )
-    .unwrap();
+        // In order to let the shader access the buffer, we need to build a *descriptor set* that
+        // contains the buffer.
+        //
+        // The resources that we bind to the descriptor set must match the resources expected by the
+        // pipeline which we pass as the first parameter.
+        //
+        // If you want to run the pipeline on multiple different buffers, you need to create multiple
+        // descriptor sets that each contain the buffer you want to run the shader on.
+        let layout = &pipeline.layout().set_layouts()[0];
+        let set = DescriptorSet::new(
+            descriptor_set_allocator.clone(),
+            layout.clone(),
+            [WriteDescriptorSet::buffer(0, data_buffer)],
+            [],
+        )
+        .unwrap();
 
-    // The `vulkano_shaders::shaders!` macro generates a struct with the correct representation of
-    // the push constants struct specified in the shader. Here we create an instance of the
-    // generated struct.
-    let push_constants = cs::PushConstantData {
-        x_resolution: X_RESOLUTION,
-        y_resolution: Y_RESOLUTION,
-        iters: ITERS,
-        exp: 2.5,
+        // In order to execute our operation, we have to build a command buffer.
+        let mut builder = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator.clone(),
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        // The `vulkano_shaders::shaders!` macro generates a struct with the correct representation of
+        // the push constants struct specified in the shader. Here we create an instance of the
+        // generated struct.
+        let push_constants = cs::PushConstantData {
+            x_resolution: X_RESOLUTION,
+            y_resolution: Y_RESOLUTION,
+            iters: ITERS,
+            exp,
+        };
+
+        // Note that we clone the pipeline and the set. Since they are both wrapped in an `Arc`,
+        // this only clones the `Arc` and not the whole pipeline or set (which aren't cloneable
+        // anyway). In this example we would avoid cloning them since this is the last time we use
+        // them, but in real code you would probably need to clone them.
+        builder
+            .bind_pipeline_compute(pipeline.clone())
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                pipeline.layout().clone(),
+                0,
+                set.clone(),
+            )
+            .unwrap()
+            .push_constants(pipeline.layout().clone(), 0, push_constants)
+            .unwrap();
+
+        // The command buffer only does one thing: execute the compute pipeline. This is called a
+        // *dispatch* operation.
+        unsafe { builder.dispatch([X_RESOLUTION.div_ceil(8), Y_RESOLUTION.div_ceil(8), 1]) }
+            .unwrap();
+
+        // Finish building the command buffer by calling `build`.
+        builder.build().unwrap()
     };
 
-    // In order to execute our operation, we have to build a command buffer.
-    let mut builder = AutoCommandBufferBuilder::primary(
-        command_buffer_allocator,
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )
-    .unwrap();
+    let aggregate_command_buffer =
+        |mandelbrot_buffer: Subbuffer<[u32]>,
+         not_empty_buffer: Subbuffer<[u32]>,
+         not_full_buffer: Subbuffer<[u32]>| {
+            // In order to execute our operation, we have to build a command buffer.
+            let mut builder = AutoCommandBufferBuilder::primary(
+                command_buffer_allocator.clone(),
+                queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )
+            .unwrap();
 
-    // Note that we clone the pipeline and the set. Since they are both wrapped in an `Arc`,
-    // this only clones the `Arc` and not the whole pipeline or set (which aren't cloneable
-    // anyway). In this example we would avoid cloning them since this is the last time we use
-    // them, but in real code you would probably need to clone them.
-    builder
-        .bind_pipeline_compute(pipeline.clone())
-        .unwrap()
-        .bind_descriptor_sets(
-            PipelineBindPoint::Compute,
-            pipeline.layout().clone(),
-            0,
-            set,
+            // The `vulkano_shaders::shaders!` macro generates a struct with the correct representation of
+            // the push constants struct specified in the shader. Here we create an instance of the
+            // generated struct.
+            let push_constants = aggregate::PushConstantData {
+                x_resolution: X_RESOLUTION,
+                y_resolution: Y_RESOLUTION,
+                x_block_count: X_BLOCK_COUNT,
+                y_block_count: Y_BLOCK_COUNT,
+                x_block_size: X_BLOCK_SIZE,
+                y_block_size: Y_BLOCK_SIZE,
+            };
+
+            // We need to create the compute pipeline that describes our operation.
+            //
+            // If you are familiar with graphics pipeline, the principle is the same except that compute
+            // pipelines are much simpler to create.
+            let pipeline = {
+                let aggregate = aggregate::load(device.clone())
+                    .unwrap()
+                    .entry_point("main")
+                    .unwrap();
+                let stage = PipelineShaderStageCreateInfo::new(aggregate);
+                let layout = PipelineLayout::new(
+                    device.clone(),
+                    PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
+                        .into_pipeline_layout_create_info(device.clone())
+                        .unwrap(),
+                )
+                .unwrap();
+                ComputePipeline::new(
+                    device.clone(),
+                    None,
+                    ComputePipelineCreateInfo::stage_layout(stage, layout),
+                )
+                .unwrap()
+            };
+
+            // In order to let the shader access the buffer, we need to build a *descriptor set* that
+            // contains the buffer.
+            //
+            // The resources that we bind to the descriptor set must match the resources expected by the
+            // pipeline which we pass as the first parameter.
+            //
+            // If you want to run the pipeline on multiple different buffers, you need to create multiple
+            // descriptor sets that each contain the buffer you want to run the shader on.
+            let layout = &pipeline.layout().set_layouts()[0];
+            let set = DescriptorSet::new(
+                descriptor_set_allocator.clone(),
+                layout.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, mandelbrot_buffer),
+                    WriteDescriptorSet::buffer(1, not_empty_buffer),
+                    WriteDescriptorSet::buffer(2, not_full_buffer),
+                ],
+                [],
+            )
+            .unwrap();
+
+            // Note that we clone the pipeline and the set. Since they are both wrapped in an `Arc`,
+            // this only clones the `Arc` and not the whole pipeline or set (which aren't cloneable
+            // anyway). In this example we would avoid cloning them since this is the last time we use
+            // them, but in real code you would probably need to clone them.
+            builder
+                .bind_pipeline_compute(pipeline.clone())
+                .unwrap()
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    pipeline.layout().clone(),
+                    0,
+                    set.clone(),
+                )
+                .unwrap()
+                .push_constants(pipeline.layout().clone(), 0, push_constants)
+                .unwrap();
+
+            // The command buffer only does one thing: execute the compute pipeline. This is called a
+            // *dispatch* operation.
+            unsafe { builder.dispatch([X_BLOCK_COUNT.div_ceil(8), Y_BLOCK_COUNT.div_ceil(8), 1]) }
+                .unwrap();
+
+            // Finish building the command buffer by calling `build`.
+            builder.build().unwrap()
+        };
+
+    let mandelbrot_count = |exp: f32| {
+        // We start by creating the buffer that will store the data.
+        let data_buffer = Buffer::new_unsized::<[u32]>(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            TOTAL_RESOLUTION as DeviceSize,
         )
-        .unwrap()
-        .push_constants(pipeline.layout().clone(), 0, push_constants)
         .unwrap();
 
-    // The command buffer only does one thing: execute the compute pipeline. This is called a
-    // *dispatch* operation.
-    unsafe { builder.dispatch([X_RESOLUTION.div_ceil(8), Y_RESOLUTION.div_ceil(8), 1]) }.unwrap();
+        // Finish building the command buffer by calling `build`.
+        let command_buffer = mandelbrot_command_buffer(data_buffer.clone(), exp);
 
-    // Finish building the command buffer by calling `build`.
-    let command_buffer = builder.build().unwrap();
+        // Let's execute this command buffer now.
+        let future = sync::now(device.clone())
+            .then_execute(queue.clone(), command_buffer)
+            .unwrap()
+            // This line instructs the GPU to signal a *fence* once the command buffer has finished
+            // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
+            // reached a certain point. We need to signal a fence here because below we want to block
+            // the CPU until the GPU has reached that point in the execution.
+            .then_signal_fence_and_flush()
+            .unwrap();
 
-    // Let's execute this command buffer now.
-    let future = sync::now(device)
-        .then_execute(queue, command_buffer)
-        .unwrap()
-        // This line instructs the GPU to signal a *fence* once the command buffer has finished
-        // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
-        // reached a certain point. We need to signal a fence here because below we want to block
-        // the CPU until the GPU has reached that point in the execution.
-        .then_signal_fence_and_flush()
+        // Blocks execution until the GPU has finished the operation. This method only exists on the
+        // future that corresponds to a signalled fence. In other words, this method wouldn't be
+        // available if we didn't call `.then_signal_fence_and_flush()` earlier. The `None` parameter
+        // is an optional timeout.
+        //
+        // Note however that dropping the `future` variable (with `drop(future)` for example) would
+        // block execution as well, and this would be the case even if we didn't call
+        // `.then_signal_fence_and_flush()`. Therefore the actual point of calling
+        // `.then_signal_fence_and_flush()` and `.wait()` is to make things more explicit. In the
+        // future, if the Rust language gets linear types vulkano may get modified so that only
+        // fence-signalled futures can get destroyed like this.
+        future.wait(None).unwrap();
+
+        // Now that the GPU is done, the content of the buffer should have been modified. Let's check
+        // it out. The call to `read()` would return an error if the buffer was still in use by the
+        // GPU.
+        let data_buffer_content = data_buffer.read().unwrap();
+        let count = (0..TOTAL_RESOLUTION)
+            .filter(|i| data_buffer_content[*i as usize] != 0)
+            .count();
+
+        // region export as image
+        // let mut image_buffer = image::ImageBuffer::new(X_RESOLUTION, Y_RESOLUTION);
+        // let in_set_color = Rgb([0u8; 3]);
+        // let not_in_set_color = Rgb([255u8; 3]);
+        // for x in 0..X_RESOLUTION {
+        //     for y in 0..Y_RESOLUTION {
+        //         let index = y * X_RESOLUTION + x;
+        //         let in_set = data_buffer_content[index as usize] != 0;
+        //         let color = if in_set { in_set_color } else { not_in_set_color };
+        //         image_buffer.put_pixel(x, y, color);
+        //     }
+        // }
+        // image_buffer.save("out.png");
+        // endregion
+
+        count
+    };
+
+    let mandelbrot_aggregate = |mandelbrot_buffer| {
+        let not_empty_buffer = Buffer::new_unsized::<[u32]>(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            TOTAL_BLOCK_COUNT as DeviceSize,
+        )
         .unwrap();
 
-    // Blocks execution until the GPU has finished the operation. This method only exists on the
-    // future that corresponds to a signalled fence. In other words, this method wouldn't be
-    // available if we didn't call `.then_signal_fence_and_flush()` earlier. The `None` parameter
-    // is an optional timeout.
-    //
-    // Note however that dropping the `future` variable (with `drop(future)` for example) would
-    // block execution as well, and this would be the case even if we didn't call
-    // `.then_signal_fence_and_flush()`. Therefore the actual point of calling
-    // `.then_signal_fence_and_flush()` and `.wait()` is to make things more explicit. In the
-    // future, if the Rust language gets linear types vulkano may get modified so that only
-    // fence-signalled futures can get destroyed like this.
-    future.wait(None).unwrap();
+        let not_full_buffer = Buffer::new_unsized::<[u32]>(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            TOTAL_BLOCK_COUNT as DeviceSize,
+        )
+        .unwrap();
 
-    // Now that the GPU is done, the content of the buffer should have been modified. Let's check
-    // it out. The call to `read()` would return an error if the buffer was still in use by the
-    // GPU.
-    let data_buffer_content = data_buffer.read().unwrap();
-    let count = (0..TOTAL_RESOLUTION)
-        .filter(|i| data_buffer_content[*i as usize] != 0)
-        .count();
-    // for n in 0..65536u32 {
-    //     let expected = (n as f32) * 12.0 + 1.0;
-    //     let actual = data_buffer_content[n as usize];
-    //     let error = ((actual - expected) / expected.max(f32::EPSILON)).abs();
-    //     assert!(error < 1e-5, "expected {expected}, got {actual}");
-    // }
+        // Finish building the command buffer by calling `build`.
+        let command_buffer = aggregate_command_buffer(
+            mandelbrot_buffer,
+            not_empty_buffer.clone(),
+            not_full_buffer.clone(),
+        );
 
-    let mut image_buffer = image::ImageBuffer::new(X_RESOLUTION, Y_RESOLUTION);
-    let in_set_color = Rgb([0u8; 3]);
-    let not_in_set_color = Rgb([255u8; 3]);
-    for x in 0..X_RESOLUTION {
-        for y in 0..Y_RESOLUTION {
-            let index = y * X_RESOLUTION + x;
-            let in_set = data_buffer_content[index as usize] != 0;
-            let color = if in_set { in_set_color } else { not_in_set_color };
-            image_buffer.put_pixel(x, y, color);
+        sync::now(device.clone())
+            .then_execute(queue.clone(), command_buffer)
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        let not_empty_buffer_content = not_empty_buffer.read().unwrap();
+        let not_full_buffer_content = not_full_buffer.read().unwrap();
+
+        println!(
+            "not empty count: {}",
+            not_empty_buffer_content.iter().filter(|x| **x != 0).count()
+        );
+        println!(
+            "not full count:  {}",
+            not_full_buffer_content.iter().filter(|x| **x != 0).count()
+        );
+
+        // region export as image
+        let mut image_buffer = image::ImageBuffer::new(X_BLOCK_COUNT, Y_BLOCK_COUNT);
+        let in_set_color = image::Rgb([0u8; 3]);
+        let not_in_set_color = image::Rgb([255u8; 3]);
+        for x in 0..X_BLOCK_COUNT {
+            for y in 0..Y_BLOCK_COUNT {
+                let index = y * X_BLOCK_COUNT + x;
+                let not_empty = not_empty_buffer_content[index as usize] != 0;
+                let not_full = not_full_buffer_content[index as usize] != 0;
+                let color = if not_empty && not_full { in_set_color } else { not_in_set_color };
+                image_buffer.put_pixel(x, y, color);
+            }
         }
-    }
-    image_buffer.save("out.png");
+        image_buffer.save("out2.png");
+        // endregion
+    };
+
+    let mandelbrot_then_aggregate = |exp: f32| {
+        // We start by creating the buffer that will store the data.
+        let data_buffer = Buffer::new_unsized::<[u32]>(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            TOTAL_RESOLUTION as DeviceSize,
+        )
+        .unwrap();
+
+        let command_buffer = mandelbrot_command_buffer(data_buffer.clone(), exp);
+
+        sync::now(device.clone())
+            .then_execute(queue.clone(), command_buffer)
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        mandelbrot_aggregate(data_buffer);
+    };
+
+    let count = mandelbrot_count(2.5);
+    let count = mandelbrot_count(2.6);
+
+    mandelbrot_then_aggregate(2.5);
 
     println!("count: {count}");
     println!("Success");
