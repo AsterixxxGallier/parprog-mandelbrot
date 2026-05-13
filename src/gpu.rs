@@ -4,6 +4,9 @@
 // been more or more used for general-purpose operations as well. This is called "General-Purpose
 // GPU", or *GPGPU*. This is what this example demonstrates.
 
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::io::{BufWriter, Write};
 use crate::{ITERS, TOTAL_RESOLUTION, X_RESOLUTION, Y_RESOLUTION};
 use indicatif::ProgressIterator;
 use std::iter::repeat_n;
@@ -499,6 +502,64 @@ fn any_all_stats(buffer: &[u32]) -> AnyAllStats {
     stats
 }
 
+fn compress(mut data: &[bool]) -> Vec<i16> {
+    let mut compressed = Vec::new();
+    while let Some(next_true_index) = data.iter().position(|b| *b == true) {
+        data = &data[next_true_index..];
+        compressed.push(next_true_index as i16);
+
+        loop {
+            let (next_15, rest) = data.split_at(15.min(data.len()));
+            if next_15.iter().all(|b| !*b) {
+                break;
+            }
+            data = rest;
+
+            let mut word = i16::MIN;
+            for (i, &b) in next_15.iter().enumerate() {
+                word |= (b as i16) << i;
+            }
+            compressed.push(word);
+        }
+    }
+    compressed
+}
+
+fn decompress(mut compressed: &[i16], len: usize) -> Vec<bool> {
+    let mut data = Vec::with_capacity(len);
+    for &word in compressed {
+        if word.is_negative() {
+            for i in 0..15.min(len - data.len()) {
+                let b = (word >> i) & 1 == 1;
+                data.push(b);
+            }
+        } else {
+            data.extend(repeat_n(false, word as usize));
+        }
+    }
+    data.extend(repeat_n(false, len - data.len()));
+    data
+}
+
+fn write_compressed(mut out: impl Write, compressed: &[i16]) -> io::Result<()> {
+    write!(out, "[")?;
+    write!(out, "0x{:x}", compressed[0])?;
+    for word in &compressed[1..] {
+        write!(out, ", 0x{:x}", word)?;
+    }
+    write!(out, "]")?;
+    Ok(())
+}
+
+fn write_full_count_and_interesting(mut out: impl Write, full_count: u32, interesting: &[bool]) -> io::Result<()> {
+    write!(out, "(")?;
+    write!(out, "{full_count}")?;
+    write!(out, ", ")?;
+    write_compressed(&mut out, &compress(interesting))?;
+    write!(out, ")")?;
+    Ok(())
+}
+
 pub(crate) fn main() {
     let device_extensions = DeviceExtensions {
         khr_storage_buffer_storage_class: true,
@@ -676,7 +737,7 @@ pub(crate) fn main() {
 
         let block_buffer_content = block_buffer.read().unwrap();
 
-        dbg!(any_all_stats(&*block_buffer_content));
+        // dbg!(any_all_stats(&*block_buffer_content));
 
         let initial_full_count = block_buffer_content.iter().filter(|x| **x == 3).count() as u32;
         let initial_interesting: Vec<bool> = block_buffer_content.iter().map(|x| *x == 1).collect();
@@ -709,7 +770,7 @@ pub(crate) fn main() {
 
         let block_buffer_content = block_buffer.read().unwrap();
 
-        dbg!(any_all_stats(&*block_buffer_content));
+        // dbg!(any_all_stats(&*block_buffer_content));
 
         let full_count = block_buffer_content.iter().filter(|x| **x == 3).count() as u32;
         let interesting: Vec<bool> = block_buffer_content.iter().map(|x| *x == 1).collect();
@@ -741,14 +802,36 @@ pub(crate) fn main() {
 
     println!("took {:?}", start.elapsed());*/
 
-    let start = Instant::now();
+    /*let start = Instant::now();
 
     // for  1_000 steps: 1168
     // for  5_000 steps: 1196
     // for 10_000 steps: 1196
     // for 20_000 steps: 1196
     let (full_count, interesting) = aggregate_range(2.0, 2.001, 5_000);
+    println!("compressed size: {} bytes", compress(&interesting).len() * 2);
+    let reconstructed = decompress(&compress(&interesting), interesting.len());
+    assert_eq!(interesting, reconstructed);
     println!("took {:?}", start.elapsed());
 
-    report_aggregate(full_count, &interesting);
+    report_aggregate(full_count, &interesting);*/
+
+    let file = OpenOptions::new().create(true).append(true).open("data.txt").unwrap();
+    let mut out = BufWriter::new(file);
+    let start = Instant::now();
+
+    // writeln!(out, "[").unwrap();
+    for i in 0..1000 {
+        write!(out, "    ").unwrap();
+        let min = 2.0 + i as f32 / 1000.0;
+        let max = min + 1.0 / 1000.0;
+        let (full_count, interesting) = aggregate_range(min, max, 5_000);
+        write_full_count_and_interesting(&mut out, full_count, &interesting).unwrap();
+        writeln!(out, ", ").unwrap();
+
+        out.flush().unwrap();
+
+        println!("i = {i:>3}, dt = {:?}", start.elapsed());
+    }
+    writeln!(out, "]").unwrap();
 }
