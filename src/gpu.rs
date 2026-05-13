@@ -192,12 +192,13 @@ mod aggregate {
     }
 }
 
-const X_BLOCK_SIZE: u32 = 8;
-const Y_BLOCK_SIZE: u32 = 8;
+pub(crate) const X_BLOCK_SIZE: u32 = 8;
+pub(crate) const Y_BLOCK_SIZE: u32 = 8;
+pub(crate) const TOTAL_BLOCK_SIZE: u32 = X_BLOCK_SIZE * Y_BLOCK_SIZE;
 
-const X_BLOCK_COUNT: u32 = X_RESOLUTION.div_ceil(X_BLOCK_SIZE);
-const Y_BLOCK_COUNT: u32 = Y_RESOLUTION.div_ceil(Y_BLOCK_SIZE);
-const TOTAL_BLOCK_COUNT: u32 = X_BLOCK_COUNT * Y_BLOCK_COUNT;
+pub(crate) const X_BLOCK_COUNT: u32 = X_RESOLUTION.div_ceil(X_BLOCK_SIZE);
+pub(crate) const Y_BLOCK_COUNT: u32 = Y_RESOLUTION.div_ceil(Y_BLOCK_SIZE);
+pub(crate) const TOTAL_BLOCK_COUNT: u32 = X_BLOCK_COUNT * Y_BLOCK_COUNT;
 
 fn allocate_u32_buffer(
     allocator: Arc<StandardMemoryAllocator>,
@@ -502,7 +503,7 @@ fn any_all_stats(buffer: &[u32]) -> AnyAllStats {
     stats
 }
 
-fn compress(mut data: &[bool]) -> Vec<i16> {
+pub(crate) fn compress(mut data: &[bool]) -> Vec<i16> {
     let mut compressed = Vec::new();
     while let Some(next_true_index) = data.iter().position(|b| *b == true) {
         data = &data[next_true_index..];
@@ -525,7 +526,7 @@ fn compress(mut data: &[bool]) -> Vec<i16> {
     compressed
 }
 
-fn decompress(mut compressed: &[i16], len: usize) -> Vec<bool> {
+pub(crate) fn decompress(mut compressed: &[i16], len: usize) -> Vec<bool> {
     let mut data = Vec::with_capacity(len);
     for &word in compressed {
         if word.is_negative() {
@@ -821,7 +822,7 @@ pub(crate) fn main() {
     let start = Instant::now();
 
     // writeln!(out, "[").unwrap();
-    for i in 0..1000 {
+    for i in 500..501 {
         write!(out, "    ").unwrap();
         let min = 2.0 + i as f32 / 1000.0;
         let max = min + 1.0 / 1000.0;

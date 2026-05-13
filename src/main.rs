@@ -1,10 +1,13 @@
 #![allow(unused)]
 
+use std::slice;
 use num::complex::{c64, Complex64 as c64};
 use rayon::prelude::*;
 use std::time::Instant;
+use crate::gpu::{decompress, TOTAL_BLOCK_COUNT, TOTAL_BLOCK_SIZE, X_BLOCK_SIZE, Y_BLOCK_SIZE};
 
 mod gpu;
+mod data;
 
 const X_RESOLUTION: u32 = 1923;
 const Y_RESOLUTION: u32 = 1447;
@@ -47,7 +50,7 @@ fn mandelbrot_count(exp: f64) -> usize {
     let mut count = 0;
     for x in 0..X_RESOLUTION {
         let re = (x as f64 / X_RESOLUTION as f64) * 4.0 - 2.0;
-        count += (0..Y_RESOLUTION).into_par_iter().map(|y| {
+        count += (0..Y_RESOLUTION).map(|y| {
             let im = (y as f64 / Y_RESOLUTION as f64) * 4.0 - 2.0;
             mandelbrot_explicit(re, im, exp)
         }).filter(|in_set| *in_set).count();
@@ -86,10 +89,65 @@ fn mandelbrot_count_half(exp: f32) -> usize {
     count
 }
 
-fn main() {
-    gpu::main();
+fn load_data(exp: f64) -> (u32, Vec<bool>) {
+    let index = ((exp - 2.0) * 1000.0) as usize;
+    let (full_count, compressed) = data::BLOCK_DATA[index];
+    let compressed = unsafe { slice::from_raw_parts(compressed.as_ptr().cast(), compressed.len()) };
+    let decompressed = decompress(compressed, TOTAL_BLOCK_COUNT as usize);
+    (full_count, decompressed)
+}
 
-    // let start = Instant::now();
+fn mandelbrot_count_with_data(exp: f64) -> usize {
+    let (full_count, interesting) = load_data(exp);
+    interesting.into_iter().enumerate().filter(|(_, b)| *b).map(|(block_index, _)| {
+        let block_x = block_index as u32 % X_BLOCK_SIZE;
+        let block_y = block_index as u32 % X_BLOCK_SIZE;
+        let x_min = block_x * X_BLOCK_SIZE;
+        let y_min = block_y * Y_BLOCK_SIZE;
+        let x_max = x_min + X_BLOCK_SIZE;
+        let y_max = y_min + Y_BLOCK_SIZE;
+        let mut count = 0;
+        for x in x_min..x_max {
+            let re = (x as f64 / X_RESOLUTION as f64) * 4.0 - 2.0;
+            for y in y_min..y_max {
+                let im = (y as f64 / Y_RESOLUTION as f64) * 4.0 - 2.0;
+                let in_set = mandelbrot_explicit(re, im, exp);
+                if in_set {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }).sum::<usize>() + (full_count * TOTAL_BLOCK_SIZE) as usize
+}
+
+fn mandelbrot_count_with_data_half(exp: f32) -> usize {
+    let (full_count, interesting) = load_data(exp as f64);
+    interesting.into_iter().enumerate().filter(|(_, b)| *b).map(|(block_index, _)| {
+        let block_x = block_index as u32 % X_BLOCK_SIZE;
+        let block_y = block_index as u32 % X_BLOCK_SIZE;
+        let x_min = block_x * X_BLOCK_SIZE;
+        let y_min = block_y * Y_BLOCK_SIZE;
+        let x_max = x_min + X_BLOCK_SIZE;
+        let y_max = y_min + Y_BLOCK_SIZE;
+        let mut count = 0;
+        for x in x_min..x_max {
+            let re = (x as f32 / X_RESOLUTION as f32) * 4.0 - 2.0;
+            for y in y_min..y_max {
+                let im = (y as f32 / Y_RESOLUTION as f32) * 4.0 - 2.0;
+                let in_set = mandelbrot_explicit_half(re, im, exp);
+                if in_set {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }).sum::<usize>() + dbg!(full_count * TOTAL_BLOCK_SIZE) as usize
+}
+
+fn main() {
+    // gpu::main();
+
     // println!("diff for 2.0: {}", mandelbrot_count(2.0).abs_diff(mandelbrot_count_half(2.0)));
     // println!("diff for 2.1: {}", mandelbrot_count(2.1).abs_diff(mandelbrot_count_half(2.1)));
     // println!("diff for 2.2: {}", mandelbrot_count(2.2).abs_diff(mandelbrot_count_half(2.2)));
@@ -101,8 +159,11 @@ fn main() {
     // println!("diff for 2.8: {}", mandelbrot_count(2.8).abs_diff(mandelbrot_count_half(2.8)));
     // println!("diff for 2.9: {}", mandelbrot_count(2.9).abs_diff(mandelbrot_count_half(2.9)));
 
-    // let count = mandelbrot_count_half(2.5);
+    assert_eq!(mandelbrot_count_half(2.5), mandelbrot_count_with_data_half(2.5));
+
+    // let start = Instant::now();
+    // let count = mandelbrot_count_with_data(2.5);
     // println!("took {:?}", start.elapsed());
     // println!("count: {count}");
-    // assert_eq!(count, 1313923);
+    // assert_eq!(count, 330266);
 }
