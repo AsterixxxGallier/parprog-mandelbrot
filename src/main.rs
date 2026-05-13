@@ -6,7 +6,6 @@ use std::time::Instant;
 
 mod gpu;
 
-// keep in sync with GLSL in gpu module
 const X_RESOLUTION: u32 = 1923;
 const Y_RESOLUTION: u32 = 1447;
 const TOTAL_RESOLUTION: u32 = X_RESOLUTION * Y_RESOLUTION;
