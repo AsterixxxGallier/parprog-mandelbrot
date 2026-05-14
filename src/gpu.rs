@@ -160,15 +160,15 @@ mod aggregate {
                 uint block_index = block_y * pc.x_block_count + block_x;
 
                 if (mask[block_index] == 0) {
-                    blocks[block_index] = 2;
+//                    blocks[block_index] = 2;
                     return;
                 }
 
-                uint min_pixel_x = block_x * pc.x_block_size;
-                uint min_pixel_y = block_y * pc.y_block_size;
+                uint min_pixel_x = max(int(block_x * pc.x_block_size) - 1, 0);
+                uint min_pixel_y = max(int(block_y * pc.y_block_size) - 1, 0);
 
-                uint max_pixel_x = min(int(pc.x_resolution), int(min_pixel_x + pc.x_block_size));
-                uint max_pixel_y = min(int(pc.y_resolution), int(min_pixel_y + pc.y_block_size));
+                uint max_pixel_x = min(int(pc.x_resolution), int(min_pixel_x + pc.x_block_size + 1));
+                uint max_pixel_y = min(int(pc.y_resolution), int(min_pixel_y + pc.y_block_size + 1));
 
                 bool block_any = false;
                 bool block_all = true;
@@ -707,7 +707,41 @@ pub(crate) fn main() {
         (count_any, count_all)
     };
 
-    let aggregate_range = |min: f32, max: f32, steps: u32| -> (u32, Vec<bool>) {
+    let check_blocks = |exp_min: f32, exp_max: f32, exp_steps: u32, blocks: Subbuffer<[u32]>| {
+        let data_buffer = allocate_u32_buffer_with(
+            memory_allocator.clone(),
+            repeat_n(2, TOTAL_RESOLUTION as usize),
+        );
+        let mask_buffer = allocate_u32_buffer_with(
+            memory_allocator.clone(),
+            repeat_n(1, TOTAL_BLOCK_COUNT as usize),
+        );
+
+        execute_mandelbrot(data_buffer.clone(), mask_buffer, exp_min, exp_max, exp_steps);
+
+        let block_buffer_content = blocks.read().unwrap();
+        let data_buffer_content = data_buffer.read().unwrap();
+        for x in 0..X_RESOLUTION {
+            for y in 0..Y_RESOLUTION {
+                let index = y * X_RESOLUTION + x;
+                let pixel_content = data_buffer_content[index as usize];
+                let pixel_any = pixel_content & 1 == 1;
+                let pixel_all = pixel_content == 3;
+
+                let block_y = y / Y_BLOCK_SIZE;
+                let block_x = x / X_BLOCK_SIZE;
+                let block_index = block_y * X_BLOCK_COUNT + block_x;
+                let block_content = block_buffer_content[block_index as usize];
+                let block_any = block_content & 1 == 1;
+
+                if pixel_any {
+                    assert!(block_any, "{x} {y}");
+                }
+            }
+        }
+    };
+
+    let aggregate_range = |min: f32, max: f32, steps: u32| -> (u32, Vec<bool>, Vec<bool>) {
         let pixel_buffer = allocate_u32_buffer_with(
             memory_allocator.clone(),
             repeat_n(2, TOTAL_RESOLUTION as usize),
@@ -769,12 +803,15 @@ pub(crate) fn main() {
             mask_buffer.clone(),
         );
 
+        check_blocks(min, max, 10_000, block_buffer.clone());
+
         let block_buffer_content = block_buffer.read().unwrap();
 
-        // dbg!(any_all_stats(&*block_buffer_content));
+        dbg!(any_all_stats(&*block_buffer_content));
 
         let full_count = block_buffer_content.iter().filter(|x| **x == 3).count() as u32;
         let interesting: Vec<bool> = block_buffer_content.iter().map(|x| *x == 1).collect();
+        let full: Vec<bool> = block_buffer_content.iter().map(|x| *x == 3).collect();
 
         for i in 0..TOTAL_BLOCK_COUNT as usize {
             if interesting[i] {
@@ -782,7 +819,30 @@ pub(crate) fn main() {
             }
         }
 
-        (initial_full_count + full_count, interesting)
+        // region export as image
+        let mut image_buffer = image::ImageBuffer::new(X_BLOCK_COUNT, Y_BLOCK_COUNT);
+        let in_set_color = image::Rgb([0u8; 3]);
+        let some_in_set_color = image::Rgb([255u8, 0, 0]);
+        let not_in_set_color = image::Rgb([255u8; 3]);
+        for x in 0..X_BLOCK_COUNT {
+            for y in 0..Y_BLOCK_COUNT {
+                let index = y * X_BLOCK_COUNT + x;
+                let any = block_buffer_content[index as usize] & 1 == 1;
+                let all = block_buffer_content[index as usize] == 3;
+                let color = if all {
+                    in_set_color
+                } else if any {
+                    some_in_set_color
+                } else {
+                    not_in_set_color
+                };
+                image_buffer.put_pixel(x, y, color);
+            }
+        }
+        image_buffer.save("out.png");
+        // endregion
+
+        (full_count, full, interesting)
     };
 
     /*let start = Instant::now();
@@ -803,36 +863,38 @@ pub(crate) fn main() {
 
     println!("took {:?}", start.elapsed());*/
 
-    /*let start = Instant::now();
+    let start = Instant::now();
 
     // for  1_000 steps: 1168
     // for  5_000 steps: 1196
     // for 10_000 steps: 1196
     // for 20_000 steps: 1196
-    let (full_count, interesting) = aggregate_range(2.0, 2.001, 5_000);
+    let (full_count, full, interesting) = aggregate_range(2.0, 2.001, 5000);
     println!("compressed size: {} bytes", compress(&interesting).len() * 2);
     let reconstructed = decompress(&compress(&interesting), interesting.len());
     assert_eq!(interesting, reconstructed);
     println!("took {:?}", start.elapsed());
 
-    report_aggregate(full_count, &interesting);*/
+    report_aggregate(full_count, &interesting);
 
-    let file = OpenOptions::new().create(true).append(true).open("data.txt").unwrap();
-    let mut out = BufWriter::new(file);
-    let start = Instant::now();
-
-    // writeln!(out, "[").unwrap();
-    for i in 500..501 {
-        write!(out, "    ").unwrap();
-        let min = 2.0 + i as f32 / 1000.0;
-        let max = min + 1.0 / 1000.0;
-        let (full_count, interesting) = aggregate_range(min, max, 5_000);
-        write_full_count_and_interesting(&mut out, full_count, &interesting).unwrap();
-        writeln!(out, ", ").unwrap();
-
-        out.flush().unwrap();
-
-        println!("i = {i:>3}, dt = {:?}", start.elapsed());
-    }
-    writeln!(out, "]").unwrap();
+    // let file = OpenOptions::new().create(true).append(true).open("data.txt").unwrap();
+    // let mut out = BufWriter::new(file);
+    // let start = Instant::now();
+    //
+    // // writeln!(out, "[").unwrap();
+    // for i in 500..501 {
+    //     write!(out, "    ").unwrap();
+    //     let min = 2.0 + i as f32 / 1000.0;
+    //     let max = min + 1.0 / 1000.0;
+    //     let (full_count, full, interesting) = aggregate_range(min, max, 5_000);
+    //     // report_aggregate(full_count, &interesting);
+    //     dbg!(full_count);
+    //     write_full_count_and_interesting(&mut out, full_count, &full).unwrap();
+    //     writeln!(out, ", ").unwrap();
+    //
+    //     out.flush().unwrap();
+    //
+    //     println!("i = {i:>3}, dt = {:?}", start.elapsed());
+    // }
+    // writeln!(out, "]").unwrap();
 }
