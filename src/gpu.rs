@@ -1,9 +1,3 @@
-// This example demonstrates how to use the compute capabilities of Vulkan.
-//
-// While graphics cards have traditionally been used for graphical operations, over time they have
-// been more or more used for general-purpose operations as well. This is called "General-Purpose
-// GPU", or *GPGPU*. This is what this example demonstrates.
-
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{BufWriter, Write};
@@ -543,7 +537,7 @@ pub(crate) fn decompress(mut compressed: &[i16], len: usize) -> Vec<bool> {
 }
 
 fn write_compressed(mut out: impl Write, compressed: &[i16]) -> io::Result<()> {
-    write!(out, "[")?;
+    write!(out, "&[")?;
     write!(out, "0x{:x}", compressed[0])?;
     for word in &compressed[1..] {
         write!(out, ", 0x{:x}", word)?;
@@ -552,9 +546,11 @@ fn write_compressed(mut out: impl Write, compressed: &[i16]) -> io::Result<()> {
     Ok(())
 }
 
-fn write_full_count_and_interesting(mut out: impl Write, full_count: u32, interesting: &[bool]) -> io::Result<()> {
+fn write_results(mut out: impl Write, full_count: u32, full: &[bool], interesting: &[bool]) -> io::Result<()> {
     write!(out, "(")?;
     write!(out, "{full_count}")?;
+    write!(out, ", ")?;
+    write_compressed(&mut out, &compress(full))?;
     write!(out, ", ")?;
     write_compressed(&mut out, &compress(interesting))?;
     write!(out, ")")?;
@@ -803,7 +799,7 @@ pub(crate) fn main() {
             mask_buffer.clone(),
         );
 
-        check_blocks(min, max, 10_000, block_buffer.clone());
+        // check_blocks(min, max, 10_000, block_buffer.clone());
 
         let block_buffer_content = block_buffer.read().unwrap();
 
@@ -820,7 +816,7 @@ pub(crate) fn main() {
         }
 
         // region export as image
-        let mut image_buffer = image::ImageBuffer::new(X_BLOCK_COUNT, Y_BLOCK_COUNT);
+        /*let mut image_buffer = image::ImageBuffer::new(X_BLOCK_COUNT, Y_BLOCK_COUNT);
         let in_set_color = image::Rgb([0u8; 3]);
         let some_in_set_color = image::Rgb([255u8, 0, 0]);
         let not_in_set_color = image::Rgb([255u8; 3]);
@@ -839,7 +835,7 @@ pub(crate) fn main() {
                 image_buffer.put_pixel(x, y, color);
             }
         }
-        image_buffer.save("out.png");
+        image_buffer.save("out.png");*/
         // endregion
 
         (full_count, full, interesting)
@@ -869,32 +865,32 @@ pub(crate) fn main() {
     // for  5_000 steps: 1196
     // for 10_000 steps: 1196
     // for 20_000 steps: 1196
-    let (full_count, full, interesting) = aggregate_range(2.0, 2.001, 5000);
-    println!("compressed size: {} bytes", compress(&interesting).len() * 2);
-    let reconstructed = decompress(&compress(&interesting), interesting.len());
-    assert_eq!(interesting, reconstructed);
-    println!("took {:?}", start.elapsed());
+    // let (full_count, full, interesting) = aggregate_range(2.5, 2.501, 10_000);
+    // println!("compressed size: {} bytes", compress(&interesting).len() * 2);
+    // let reconstructed = decompress(&compress(&interesting), interesting.len());
+    // assert_eq!(interesting, reconstructed);
+    // println!("took {:?}", start.elapsed());
+    //
+    // report_aggregate(full_count, &interesting);
 
-    report_aggregate(full_count, &interesting);
+    let file = OpenOptions::new().create(true).append(true).open("data.txt").unwrap();
+    let mut out = BufWriter::new(file);
+    // let mut out = io::stdout();
+    let start = Instant::now();
 
-    // let file = OpenOptions::new().create(true).append(true).open("data.txt").unwrap();
-    // let mut out = BufWriter::new(file);
-    // let start = Instant::now();
-    //
-    // // writeln!(out, "[").unwrap();
-    // for i in 500..501 {
-    //     write!(out, "    ").unwrap();
-    //     let min = 2.0 + i as f32 / 1000.0;
-    //     let max = min + 1.0 / 1000.0;
-    //     let (full_count, full, interesting) = aggregate_range(min, max, 5_000);
-    //     // report_aggregate(full_count, &interesting);
-    //     dbg!(full_count);
-    //     write_full_count_and_interesting(&mut out, full_count, &full).unwrap();
-    //     writeln!(out, ", ").unwrap();
-    //
-    //     out.flush().unwrap();
-    //
-    //     println!("i = {i:>3}, dt = {:?}", start.elapsed());
-    // }
-    // writeln!(out, "]").unwrap();
+    writeln!(out, "[").unwrap();
+    for i in 0..1000 {
+        write!(out, "    ").unwrap();
+        let min = 2.0 + i as f32 / 1000.0;
+        let max = min + 1.0 / 1000.0;
+        let (full_count, full, interesting) = aggregate_range(min, max, 10_000);
+        write_results(&mut out, full_count, &full, &interesting).unwrap();
+        writeln!(out, ", ").unwrap();
+
+        out.flush().unwrap();
+
+        println!("i = {i:>3}, dt = {:?}", start.elapsed());
+    }
+    writeln!(out, "]").unwrap();
+    out.flush().unwrap();
 }
