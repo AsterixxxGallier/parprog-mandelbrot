@@ -102,8 +102,8 @@ fn mandelbrot_count_half(exp: f32) -> usize {
 }
 
 fn load_data(exp: f64) -> (u32, Vec<bool>) {
-    // let index = ((exp - 2.0) * 1000.0) as usize;
-    let (full_count, compressed_full, compressed_interesting) = data::BLOCK_DATA[0];
+    let index = ((exp - 2.0) * 1000.0) as usize;
+    let (full_count, compressed_full, compressed_interesting) = data::BLOCK_DATA[index];
     _ = compressed_full;
     let compressed = compressed_interesting;
     let compressed = unsafe { slice::from_raw_parts(compressed.as_ptr().cast(), compressed.len()) };
@@ -180,17 +180,16 @@ fn main() {
     //     }
     // }
 
-    gpu::main();
+    // gpu::main();
 
-    // let values = [2.5, 2.5001, 2.5002, 2.5003, 2.5004, 2.5005, 2.50061435163];
-    // let values = (0..100).map(|i| 2.5 + i as f64 / 100_000.0);
-    // for exp in values {
-    //     let diff = mandelbrot_count(exp).abs_diff(mandelbrot_count_with_data(exp));
-    //     println!("for exp {exp}: diff {diff}");
-    // }
+    let values = (0..100).map(|i| 2.0 + i as f64 / 100.0);
+    for exp in values {
+        let diff = mandelbrot_count(exp).abs_diff(mandelbrot_count_with_data(exp));
+        println!("for exp {exp}: diff {diff}");
+    }
 
     // let start = Instant::now();
-    // let count = mandelbrot_count(2.500);
+    // let count = mandelbrot_count_with_data(2.8);
     // println!("took {:?}", start.elapsed());
     // println!("count: {count}");
     // assert_eq!(count, 330238);

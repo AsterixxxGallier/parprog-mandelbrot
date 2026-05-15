@@ -158,11 +158,11 @@ mod aggregate {
                     return;
                 }
 
-                uint min_pixel_x = max(int(block_x * pc.x_block_size) - 1, 0);
-                uint min_pixel_y = max(int(block_y * pc.y_block_size) - 1, 0);
+                uint min_pixel_x = max(int(block_x * pc.x_block_size) - 4, 0);
+                uint min_pixel_y = max(int(block_y * pc.y_block_size) - 4, 0);
 
-                uint max_pixel_x = min(int(pc.x_resolution), int(min_pixel_x + pc.x_block_size + 1));
-                uint max_pixel_y = min(int(pc.y_resolution), int(min_pixel_y + pc.y_block_size + 1));
+                uint max_pixel_x = min(int(pc.x_resolution), int(min_pixel_x + pc.x_block_size + 4));
+                uint max_pixel_y = min(int(pc.y_resolution), int(min_pixel_y + pc.y_block_size + 4));
 
                 bool block_any = false;
                 bool block_all = true;
@@ -883,7 +883,7 @@ pub(crate) fn main() {
         write!(out, "    ").unwrap();
         let min = 2.0 + i as f32 / 1000.0;
         let max = min + 1.0 / 1000.0;
-        let (full_count, full, interesting) = aggregate_range(min, max, 10_000);
+        let (full_count, full, interesting) = aggregate_range(min, max, 1_000);
         write_results(&mut out, full_count, &full, &interesting).unwrap();
         writeln!(out, ", ").unwrap();
 
