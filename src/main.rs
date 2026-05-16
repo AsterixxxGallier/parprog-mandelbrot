@@ -2,14 +2,19 @@
 
 #![allow(unused)]
 
-use std::slice;
-use num::complex::{c64, Complex64 as c64};
+use crate::data::BLOCK_DATA;
+use crate::gpu::{
+    decompress, TOTAL_BLOCK_COUNT, TOTAL_BLOCK_SIZE, X_BLOCK_COUNT, X_BLOCK_SIZE, Y_BLOCK_SIZE,
+};
+use num::complex::Complex64 as c64;
 use rayon::prelude::*;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::{io, slice};
 use std::time::Instant;
-use crate::gpu::{decompress, TOTAL_BLOCK_COUNT, TOTAL_BLOCK_SIZE, X_BLOCK_COUNT, X_BLOCK_SIZE, Y_BLOCK_SIZE};
 
-mod gpu;
 mod data;
+mod gpu;
 
 const X_RESOLUTION: u32 = 1923;
 const Y_RESOLUTION: u32 = 1447;
@@ -56,16 +61,20 @@ fn mandelbrot_count(exp: f64) -> usize {
     let mut count = 0;
     for x in 0..X_RESOLUTION {
         let re = (x as f64 / X_RESOLUTION as f64) * 4.0 - 2.0;
-        count += (0..Y_RESOLUTION).into_par_iter().map(|y| {
-            let im = (y as f64 / Y_RESOLUTION as f64) * 4.0 - 2.0;
-            let in_set = mandelbrot_explicit(re, im, exp);
-            // if in_set {
-            //     let full = pixel_is_interesting(x, y, &full_blocks);
-            //     let interesting = pixel_is_interesting(x, y, &interesting_blocks);
-            //     assert!(full | interesting, "{x} {y} is not full and not interesting");
-            // }
-            in_set
-        }).filter(|in_set| *in_set).count();
+        count += (0..Y_RESOLUTION)
+            .into_par_iter()
+            .map(|y| {
+                let im = (y as f64 / Y_RESOLUTION as f64) * 4.0 - 2.0;
+                let in_set = mandelbrot_explicit(re, im, exp);
+                // if in_set {
+                //     let full = pixel_is_interesting(x, y, &full_blocks);
+                //     let interesting = pixel_is_interesting(x, y, &interesting_blocks);
+                //     assert!(full | interesting, "{x} {y} is not full and not interesting");
+                // }
+                in_set
+            })
+            .filter(|in_set| *in_set)
+            .count();
     }
     count
 }
@@ -93,10 +102,14 @@ fn mandelbrot_count_half(exp: f32) -> usize {
     let mut count = 0;
     for x in 0..X_RESOLUTION {
         let re = (x as f32 / X_RESOLUTION as f32) * 4.0 - 2.0;
-        count += (0..Y_RESOLUTION).into_par_iter().map(|y| {
-            let im = (y as f32 / Y_RESOLUTION as f32) * 4.0 - 2.0;
-            mandelbrot_explicit_half(re, im, exp)
-        }).filter(|in_set| *in_set).count();
+        count += (0..Y_RESOLUTION)
+            .into_par_iter()
+            .map(|y| {
+                let im = (y as f32 / Y_RESOLUTION as f32) * 4.0 - 2.0;
+                mandelbrot_explicit_half(re, im, exp)
+            })
+            .filter(|in_set| *in_set)
+            .count();
     }
     count
 }
@@ -120,53 +133,113 @@ fn pixel_is_interesting(x: u32, y: u32, blocks: &[bool]) -> bool {
 
 fn mandelbrot_count_with_data(exp: f64) -> usize {
     let (full_count, interesting) = load_data(exp);
-    interesting.into_par_iter().enumerate().filter(|(_, b)| *b).map(|(block_index, _)| {
-        let block_x = block_index as u32 % X_BLOCK_COUNT;
-        let block_y = block_index as u32 / X_BLOCK_COUNT;
-        let x_min = block_x * X_BLOCK_SIZE;
-        let y_min = block_y * Y_BLOCK_SIZE;
-        let x_max = x_min + X_BLOCK_SIZE;
-        let y_max = y_min + Y_BLOCK_SIZE;
-        let mut count = 0;
-        for x in x_min..x_max {
-            let re = (x as f64 / X_RESOLUTION as f64) * 4.0 - 2.0;
-            for y in y_min..y_max {
-                let im = (y as f64 / Y_RESOLUTION as f64) * 4.0 - 2.0;
-                let in_set = mandelbrot_explicit(re, im, exp);
-                if in_set {
-                    count += 1;
+    interesting
+        .into_par_iter()
+        .enumerate()
+        .filter(|(_, b)| *b)
+        .map(|(block_index, _)| {
+            let block_x = block_index as u32 % X_BLOCK_COUNT;
+            let block_y = block_index as u32 / X_BLOCK_COUNT;
+            let x_min = block_x * X_BLOCK_SIZE;
+            let y_min = block_y * Y_BLOCK_SIZE;
+            let x_max = x_min + X_BLOCK_SIZE;
+            let y_max = y_min + Y_BLOCK_SIZE;
+            let mut count = 0;
+            for x in x_min..x_max {
+                let re = (x as f64 / X_RESOLUTION as f64) * 4.0 - 2.0;
+                for y in y_min..y_max {
+                    let im = (y as f64 / Y_RESOLUTION as f64) * 4.0 - 2.0;
+                    let in_set = mandelbrot_explicit(re, im, exp);
+                    if in_set {
+                        count += 1;
+                    }
                 }
             }
-        }
-        count
-    }).sum::<usize>() + (full_count * TOTAL_BLOCK_SIZE) as usize
+            count
+        })
+        .sum::<usize>()
+        + (full_count * TOTAL_BLOCK_SIZE) as usize
 }
 
 fn mandelbrot_count_with_data_half(exp: f32) -> usize {
     let (full_count, interesting) = load_data(exp as f64);
-    interesting.into_par_iter().enumerate().filter(|(_, b)| *b).map(|(block_index, _)| {
-        let block_x = block_index as u32 % X_BLOCK_COUNT;
-        let block_y = block_index as u32 / X_BLOCK_COUNT;
-        let x_min = block_x * X_BLOCK_SIZE;
-        let y_min = block_y * Y_BLOCK_SIZE;
-        let x_max = x_min + X_BLOCK_SIZE;
-        let y_max = y_min + Y_BLOCK_SIZE;
-        let mut count = 0;
-        for x in x_min..x_max {
-            let re = (x as f32 / X_RESOLUTION as f32) * 4.0 - 2.0;
-            for y in y_min..y_max {
-                let im = (y as f32 / Y_RESOLUTION as f32) * 4.0 - 2.0;
-                let in_set = mandelbrot_explicit_half(re, im, exp);
-                if in_set {
-                    count += 1;
+    interesting
+        .into_par_iter()
+        .enumerate()
+        .filter(|(_, b)| *b)
+        .map(|(block_index, _)| {
+            let block_x = block_index as u32 % X_BLOCK_COUNT;
+            let block_y = block_index as u32 / X_BLOCK_COUNT;
+            let x_min = block_x * X_BLOCK_SIZE;
+            let y_min = block_y * Y_BLOCK_SIZE;
+            let x_max = x_min + X_BLOCK_SIZE;
+            let y_max = y_min + Y_BLOCK_SIZE;
+            let mut count = 0;
+            for x in x_min..x_max {
+                let re = (x as f32 / X_RESOLUTION as f32) * 4.0 - 2.0;
+                for y in y_min..y_max {
+                    let im = (y as f32 / Y_RESOLUTION as f32) * 4.0 - 2.0;
+                    let in_set = mandelbrot_explicit_half(re, im, exp);
+                    if in_set {
+                        count += 1;
+                    }
                 }
             }
+            count
+        })
+        .sum::<usize>()
+        + dbg!(full_count * TOTAL_BLOCK_SIZE) as usize
+}
+
+fn export_data_for_cpp() -> io::Result<()> {
+    let file = File::create("data.h")?;
+    let mut out = BufWriter::new(file);
+    writeln!(out, "#include <cstdint>")?;
+    writeln!(out)?;
+    write!(out, "constexpr int full_counts[] = {{")?;
+    for (full_count, _full, _interesting) in BLOCK_DATA {
+        write!(out, "{full_count},")?;
+    }
+    writeln!(out, "}};")?;
+    writeln!(out)?;
+    for (index, (_full_count, _full, interesting)) in BLOCK_DATA.iter().enumerate() {
+        write!(out, "constexpr uint16_t ib_{index}[] = {{")?;
+        for word in *interesting {
+            write!(out, "0x{:x},", word)?;
         }
-        count
-    }).sum::<usize>() + dbg!(full_count * TOTAL_BLOCK_SIZE) as usize
+        writeln!(out, "}};")?;
+    }
+    writeln!(out)?;
+    write!(out, "constexpr uint16_t const *interesting_blocks[] = {{")?;
+    for index in 0..BLOCK_DATA.len() {
+        write!(out, "ib_{index},")?;
+    }
+    writeln!(out, "}};")?;
+    writeln!(out)?;
+    write!(out, "constexpr int interesting_blocks_sizes[] = {{")?;
+    for (_full_count, _full, interesting) in BLOCK_DATA {
+        write!(out, "{},", interesting.len())?;
+    }
+    writeln!(out, "}};")?;
+    out.flush()?;
+    Ok(())
 }
 
 fn main() {
+    // export_data_for_cpp().unwrap();
+
+    // for (index, b) in decompress(
+    //     unsafe { core::mem::transmute(BLOCK_DATA[500].2) },
+    //     TOTAL_BLOCK_COUNT as usize,
+    // )
+    // .into_iter()
+    // .enumerate()
+    // {
+    //     if b {
+    //         println!("{index}");
+    //     }
+    // }
+
     // let x = 108;
     // let y = 719;
     // let re = (x as f64 / X_RESOLUTION as f64) * 4.0 - 2.0;
@@ -182,15 +255,15 @@ fn main() {
 
     // gpu::main();
 
-    let values = (0..100).map(|i| 2.0 + i as f64 / 100.0);
-    for exp in values {
-        let diff = mandelbrot_count(exp).abs_diff(mandelbrot_count_with_data(exp));
-        println!("for exp {exp}: diff {diff}");
-    }
+    // let values = (0..100).map(|i| 2.0 + i as f64 / 100.0);
+    // for exp in values {
+    //     let diff = mandelbrot_count(exp).abs_diff(mandelbrot_count_with_data(exp));
+    //     println!("for exp {exp}: diff {diff}");
+    // }
 
-    // let start = Instant::now();
-    // let count = mandelbrot_count_with_data(2.8);
-    // println!("took {:?}", start.elapsed());
-    // println!("count: {count}");
+    let start = Instant::now();
+    let count = mandelbrot_count_with_data(2.5);
+    println!("took {:?}", start.elapsed());
+    println!("count: {count}");
     // assert_eq!(count, 330238);
 }
