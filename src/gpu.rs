@@ -158,11 +158,11 @@ mod aggregate {
                     return;
                 }
 
-                uint min_pixel_x = max(int(block_x * pc.x_block_size) - 4, 0);
-                uint min_pixel_y = max(int(block_y * pc.y_block_size) - 4, 0);
+                uint min_pixel_x = max(int(block_x * pc.x_block_size), 0);
+                uint min_pixel_y = max(int(block_y * pc.y_block_size), 0);
 
-                uint max_pixel_x = min(int(pc.x_resolution), int(min_pixel_x + pc.x_block_size + 4));
-                uint max_pixel_y = min(int(pc.y_resolution), int(min_pixel_y + pc.y_block_size + 4));
+                uint max_pixel_x = min(int(pc.x_resolution), int(min_pixel_x + pc.x_block_size));
+                uint max_pixel_y = min(int(pc.y_resolution), int(min_pixel_y + pc.y_block_size));
 
                 bool block_any = false;
                 bool block_all = true;

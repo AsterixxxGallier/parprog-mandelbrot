@@ -226,7 +226,7 @@ fn export_data_for_cpp() -> io::Result<()> {
 }
 
 fn main() {
-    // export_data_for_cpp().unwrap();
+    export_data_for_cpp().unwrap();
 
     // for (index, b) in decompress(
     //     unsafe { core::mem::transmute(BLOCK_DATA[500].2) },
@@ -261,9 +261,9 @@ fn main() {
     //     println!("for exp {exp}: diff {diff}");
     // }
 
-    let start = Instant::now();
-    let count = mandelbrot_count_with_data(2.5);
-    println!("took {:?}", start.elapsed());
-    println!("count: {count}");
+    // let start = Instant::now();
+    // let count = mandelbrot_count_with_data(2.5);
+    // println!("took {:?}", start.elapsed());
+    // println!("count: {count}");
     // assert_eq!(count, 330238);
 }
